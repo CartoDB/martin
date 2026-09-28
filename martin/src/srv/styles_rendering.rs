@@ -87,9 +87,19 @@ struct StyleRenderRequest {
     style_id: String,
     z: u8,
     x: u32,
-    y: u32,
+    /// The row, optionally followed by `@2x` for a double-density tile.
+    y: String,
     #[cfg_attr(feature = "unstable-schemas", param(inline))]
     format: ImageFormatRequest,
+}
+
+/// Splits `123` / `123@2x` into the row and the requested pixel ratio.
+fn parse_row(y: &str) -> Option<(u32, martin_core::styles::PixelRatio)> {
+    use martin_core::styles::PixelRatio;
+    match y.strip_suffix("@2x") {
+        Some(row) => Some((row.parse().ok()?, PixelRatio::X2)),
+        None => Some((y.parse().ok()?, PixelRatio::X1)),
+    }
 }
 
 #[cfg_attr(
@@ -119,7 +129,12 @@ pub async fn get_rendered_tile_style(
             .content_type(ContentType::plaintext())
             .body("No such style exists");
     };
-    let Some(zxy) = TileCoord::new_checked(path.z, path.x, path.y) else {
+    let Some((y, pixel_ratio)) = parse_row(&path.y) else {
+        return HttpResponse::BadRequest()
+            .content_type(ContentType::plaintext())
+            .body("Invalid tile row");
+    };
+    let Some(zxy) = TileCoord::new_checked(path.z, path.x, y) else {
         return HttpResponse::BadRequest()
             .content_type(ContentType::plaintext())
             .body("Invalid tile coordinates for zoom level");
@@ -133,7 +148,7 @@ pub async fn get_rendered_tile_style(
     let response = {
         use martin_core::styles::StyleError;
 
-        match styles.render(style_path, zxy.z(), zxy.x(), zxy.y()).await {
+        match styles.render(style_path, zxy.z(), zxy.x(), zxy.y(), pixel_ratio).await {
             Ok(image) => encode_image_response(image.as_image(), path.format),
             Err(StyleError::RenderingIsDisabled) => rendering_disabled(style_id, zxy),
             Err(e) => {

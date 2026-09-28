@@ -121,13 +121,14 @@ impl RenderPools {
         })
     }
 
-    /// Render a 512×512 slippy tile asynchronously.
+    /// Render a 256×256 slippy tile asynchronously, at `pixel_ratio` 1 or 2 (`@2x`).
     pub async fn render_tile(
         &self,
         style_path: PathBuf,
         z: u8,
         x: u32,
         y: u32,
+        pixel_ratio: PixelRatio,
     ) -> Result<Image, StyleError> {
         self.tile
             .render(TileRequest {
@@ -135,6 +136,7 @@ impl RenderPools {
                 z,
                 x,
                 y,
+                pixel_ratio,
             })
             .await
     }
@@ -300,19 +302,41 @@ trait Worker: Default + 'static {
     fn render(&mut self, request: Self::Request) -> Result<Image, StyleError>;
 }
 
+/// Output density of a rendered tile: `@1x` (256 px) or `@2x` (512 px).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PixelRatio {
+    /// 256×256 output.
+    X1,
+    /// 512×512 output, the same area drawn at double density.
+    X2,
+}
+
+/// Logical size of a rendered tile; `@2x` doubles the output pixels, not the area.
+const TILE_SIZE: u32 = 256;
+
 /// A slippy-tile render request.
 struct TileRequest {
     style_path: PathBuf,
     z: u8,
     x: u32,
     y: u32,
+    pixel_ratio: PixelRatio,
 }
 
-/// Worker that renders 512×512 slippy tiles via the tile renderer.
+/// A tile renderer and the style it currently has loaded.
 #[derive(Default)]
-struct TileWorker {
+struct TileSlot {
     renderer: Option<ImageRenderer<Tile>>,
     loaded_style: Option<PathBuf>,
+}
+
+/// Worker that renders slippy tiles via the tile renderer.
+///
+/// Keeps one renderer per pixel ratio, so mixed `@1x`/`@2x` traffic never rebuilds one.
+#[derive(Default)]
+struct TileWorker {
+    x1: TileSlot,
+    x2: TileSlot,
 }
 
 impl Worker for TileWorker {
@@ -320,12 +344,20 @@ impl Worker for TileWorker {
     type Request = TileRequest;
 
     fn render(&mut self, req: TileRequest) -> Result<Image, StyleError> {
-        let renderer = self
-            .renderer
-            .get_or_insert_with(|| ImageRendererBuilder::default().build_tile_renderer());
-        load_style_cached(renderer, &mut self.loaded_style, &req.style_path)?;
+        let (slot, ratio) = match req.pixel_ratio {
+            PixelRatio::X1 => (&mut self.x1, 1.0),
+            PixelRatio::X2 => (&mut self.x2, 2.0),
+        };
+        let renderer = slot.renderer.get_or_insert_with(|| {
+            let size = NonZeroU32::new(TILE_SIZE).expect("tile size is non-zero");
+            ImageRendererBuilder::default()
+                .with_size(size, size)
+                .with_pixel_ratio(ratio)
+                .build_tile_renderer()
+        });
+        load_style_cached(renderer, &mut slot.loaded_style, &req.style_path)?;
         renderer
-            .render_tile(req.z, req.x, req.y)
+            .render_tile_sized(req.z, req.x, req.y, TILE_SIZE)
             .map_err(StyleError::RenderingError)
     }
 }

@@ -38,7 +38,7 @@ pub use error::StyleError;
 #[cfg(all(feature = "rendering", target_os = "linux"))]
 pub mod render_pool;
 #[cfg(all(feature = "rendering", target_os = "linux"))]
-pub use render_pool::RenderParams;
+pub use render_pool::{PixelRatio, RenderParams};
 #[cfg(all(feature = "rendering", target_os = "linux"))]
 use render_pool::RenderPools;
 
@@ -179,13 +179,20 @@ impl StyleSources {
         self.sources.is_empty()
     }
 
-    /// Renders a 512×512 slippy tile via the dedicated tile renderer.
+    /// Renders a 256×256 slippy tile (`@2x`: 512×512) via the dedicated tile renderer.
     #[cfg(all(feature = "rendering", target_os = "linux"))]
-    pub async fn render(&self, path: PathBuf, z: u8, x: u32, y: u32) -> Result<Image, StyleError> {
+    pub async fn render(
+        &self,
+        path: PathBuf,
+        z: u8,
+        x: u32,
+        y: u32,
+        pixel_ratio: PixelRatio,
+    ) -> Result<Image, StyleError> {
         self.pools
             .as_ref()
             .ok_or(StyleError::RenderingIsDisabled)?
-            .render_tile(path, z, x, y)
+            .render_tile(path, z, x, y, pixel_ratio)
             .await
     }
 
