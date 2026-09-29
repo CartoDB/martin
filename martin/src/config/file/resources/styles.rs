@@ -94,12 +94,30 @@ pub struct RendererConfig {
 )]
 #[cfg_attr(feature = "unstable-schemas", derive(schemars::JsonSchema))]
 pub struct PngPaletteConfig {
-    /// Maximum palette size, 2 to 256. Fewer colours means smaller files.
-    pub max_colors: u16,
+    /// Maximum palette size, 2 to 256. Fewer colours means smaller files. Defaults to 32.
+    #[serde(default = "PngPaletteConfig::default_max_colors")]
+    pub max_colors: u32,
 
     #[serde(flatten, skip_serializing)]
     #[cfg_attr(feature = "unstable-schemas", schemars(skip))]
     pub unrecognized: UnrecognizedValues,
+}
+
+#[cfg(feature = "rendering")]
+impl PngPaletteConfig {
+    const fn default_max_colors() -> u32 {
+        32
+    }
+}
+
+#[cfg(feature = "rendering")]
+impl Default for PngPaletteConfig {
+    fn default() -> Self {
+        Self {
+            max_colors: Self::default_max_colors(),
+            unrecognized: UnrecognizedValues::default(),
+        }
+    }
 }
 
 pub type StyleConfig = FileConfig<InnerStyleConfig>;
@@ -133,8 +151,11 @@ impl StyleConfig {
                         martin_core::styles::TileSize::Px512
                     }
                 });
-                results
-                    .set_png_max_colors(o.png_palette.as_ref().map(|p| p.max_colors.clamp(2, 256)));
+                results.set_png_max_colors(
+                    o.png_palette
+                        .as_ref()
+                        .and_then(|p| u16::try_from(p.max_colors.clamp(2, 256)).ok()),
+                );
             }
         }
         #[cfg(all(feature = "rendering", not(target_os = "linux")))]
