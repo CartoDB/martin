@@ -117,7 +117,7 @@ unstable-cog = [
     "_file_kinds",
 ]
 overlay = ["martin-core/overlay", "dep:geojson", "dep:csscolorparser"]
-rendering = ["styles", "overlay", "martin-core/rendering", "dep:image"]
+rendering = ["styles", "overlay", "martin-core/rendering", "dep:image", "dep:png", "dep:quantizr"]
 fonts = ["martin-core/fonts", "_catalog"]
 lambda = ["dep:lambda-web"]
 mbtiles = ["martin-core/mbtiles", "dep:mbtiles", "_tiles", "_file_kinds"]
@@ -201,6 +201,8 @@ geojson = { workspace = true, optional = true }
 hotpath = { workspace = true, features = ["tokio"] }
 humantime-serde.workspace = true
 image = { workspace = true, optional = true }
+png = { workspace = true, optional = true }
+quantizr = { workspace = true, optional = true }
 indicatif.workspace = true
 itertools.workspace = true
 json-patch = { workspace = true, optional = true }
