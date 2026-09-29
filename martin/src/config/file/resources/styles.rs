@@ -69,10 +69,35 @@ pub struct RendererConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_pixel_ratio: Option<u8>,
 
+    /// Encode rendered PNGs as indexed images. Unset keeps full-colour RGBA.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub png_palette: Option<PngPaletteConfig>,
+
     #[serde(flatten, skip_serializing)]
     #[cfg_attr(feature = "unstable-schemas", schemars(skip))]
     pub unrecognized: UnrecognizedValues,
 }
+#[cfg(feature = "rendering")]
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    CollectUnrecognizedKeys,
+    ConfigurationLivecycleHooks,
+)]
+#[cfg_attr(feature = "unstable-schemas", derive(schemars::JsonSchema))]
+pub struct PngPaletteConfig {
+    /// Maximum palette size, 2 to 256. Fewer colours means smaller files.
+    pub max_colors: u16,
+
+    #[serde(flatten, skip_serializing)]
+    #[cfg_attr(feature = "unstable-schemas", schemars(skip))]
+    pub unrecognized: UnrecognizedValues,
+}
+
 pub type StyleConfig = FileConfigEnum<InnerStyleConfig>;
 
 impl StyleConfig {
@@ -100,6 +125,9 @@ impl StyleConfig {
                     .enable_rendering(o.workers, o.renderers_per_worker)
                     .map_err(ConfigFileError::RendererPoolSpawnFailed)?;
                 results.set_max_pixel_ratio(o.max_pixel_ratio.and_then(std::num::NonZeroU8::new));
+                results.set_png_max_colors(
+                    o.png_palette.as_ref().map(|p| p.max_colors.clamp(2, 256)),
+                );
             }
         }
         #[cfg(all(feature = "rendering", not(target_os = "linux")))]

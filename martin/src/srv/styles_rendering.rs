@@ -57,7 +57,19 @@ impl ImageFormatRequest {
 pub(super) fn encode_image_response(
     img: &image::RgbaImage,
     format: ImageFormatRequest,
+    png_max_colors: Option<u16>,
 ) -> HttpResponse {
+    if let (ImageFormatRequest::Png, Some(max_colors)) = (format, png_max_colors) {
+        return match crate::srv::png_palette::encode(img, max_colors) {
+            Ok(bytes) => HttpResponse::Ok().content_type(ContentType::png()).body(bytes),
+            Err(e) => {
+                error!("Failed to encode palette image: {e}");
+                HttpResponse::InternalServerError()
+                    .content_type(ContentType::plaintext())
+                    .body("Failed to encode image")
+            }
+        };
+    }
     let image_format = format.image_format();
     let dynamic_img = DynamicImage::ImageRgba8(img.clone());
     let to_encode = if image_format == ImageFormat::Jpeg {
@@ -154,7 +166,7 @@ pub async fn get_rendered_tile_style(
         use martin_core::styles::StyleError;
 
         match styles.render(style_path, zxy.z(), zxy.x(), zxy.y(), pixel_ratio).await {
-            Ok(image) => encode_image_response(image.as_image(), path.format),
+            Ok(image) => encode_image_response(image.as_image(), path.format, styles.png_max_colors()),
             Err(StyleError::RenderingIsDisabled) => rendering_disabled(style_id, zxy),
             Err(e) => {
                 error!("Failed to render style {style_id} at {zxy}: {e}");

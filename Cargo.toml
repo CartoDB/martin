@@ -152,6 +152,7 @@ object_store = { version = "0.14.1", features = ["gcp", "aws", "azure", "fs", "h
 pbf_font_tools = { version = "3.1.1", features = ["freetype"] }
 pmtiles = { version = "0.24.0", default-features = false, features = ["tilejson", "object-store", "mmap-async-tokio"] }
 png = "0.18.0"
+quantizr = "1.4"
 postgis = "0.9"
 postgres = { version = "0.19", features = [
     "with-time-0_3",
