@@ -53,6 +53,26 @@ impl ImageFormatRequest {
     }
 }
 
+/// [`encode_image_response`] on a blocking thread: palette encoding costs milliseconds of CPU
+/// per tile, which would stall every other request on this actix worker if it ran inline.
+#[cfg(target_os = "linux")]
+pub(super) async fn encode_image_response_blocking(
+    image: martin_core::styles::StaticImage,
+    format: ImageFormatRequest,
+    png_max_colors: Option<u16>,
+) -> HttpResponse {
+    tokio::task::spawn_blocking(move || {
+        encode_image_response(image.as_image(), format, png_max_colors)
+    })
+    .await
+    .unwrap_or_else(|e| {
+        error!("Image encoding task failed: {e}");
+        HttpResponse::InternalServerError()
+            .content_type(ContentType::plaintext())
+            .body("Failed to encode image")
+    })
+}
+
 /// Encode `img` into `format` and wrap it in a successful [`HttpResponse`].
 /// JPEG has no alpha channel, so RGBA is flattened to RGB before encoding.
 pub(super) fn encode_image_response(
@@ -207,7 +227,7 @@ pub async fn get_rendered_tile_style(
             .await
         {
             Ok(image) => {
-                encode_image_response(image.as_image(), path.format, styles.png_max_colors())
+                encode_image_response_blocking(image, path.format, styles.png_max_colors()).await
             }
             Err(StyleError::RenderingIsDisabled) => rendering_disabled(style_id, zxy),
             Err(e) => {
