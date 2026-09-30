@@ -1,7 +1,8 @@
 use std::num::{NonZeroU8, NonZeroU32, NonZeroUsize};
+use std::ops::{Deref, DerefMut};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 
 use maplibre_native::{
@@ -325,6 +326,44 @@ struct TileRequest {
     pixel_ratio: NonZeroU8,
 }
 
+/// Serializes creating and dropping renderers across all worker threads.
+static RENDERER_LIFECYCLE: Mutex<()> = Mutex::new(());
+
+/// A renderer that is built and dropped under [`RENDERER_LIFECYCLE`].
+///
+/// Each renderer brings up and tears down its own Vulkan instance, and the Vulkan loader
+/// unloads drivers without devices while doing so. Another thread resolving device
+/// functions at that moment segfaults in `libvulkan`, so this must never run concurrently.
+struct Renderer<S>(Option<ImageRenderer<S>>);
+
+impl<S> Renderer<S> {
+    fn build(build: impl FnOnce() -> ImageRenderer<S>) -> Self {
+        let _lifecycle = RENDERER_LIFECYCLE.lock().unwrap_or_else(PoisonError::into_inner);
+        Self(Some(build()))
+    }
+}
+
+impl<S> Deref for Renderer<S> {
+    type Target = ImageRenderer<S>;
+
+    fn deref(&self) -> &ImageRenderer<S> {
+        self.0.as_ref().expect("only taken on drop")
+    }
+}
+
+impl<S> DerefMut for Renderer<S> {
+    fn deref_mut(&mut self) -> &mut ImageRenderer<S> {
+        self.0.as_mut().expect("only taken on drop")
+    }
+}
+
+impl<S> Drop for Renderer<S> {
+    fn drop(&mut self) {
+        let _lifecycle = RENDERER_LIFECYCLE.lock().unwrap_or_else(PoisonError::into_inner);
+        drop(self.0.take());
+    }
+}
+
 /// How many (style, pixel ratio) renderers a tile worker keeps loaded when none is configured.
 pub const DEFAULT_RENDERERS_PER_WORKER: NonZeroUsize = NonZeroUsize::new(8).expect("8 != 0");
 
@@ -333,7 +372,7 @@ struct TileSlot {
     style_path: PathBuf,
     pixel_ratio: NonZeroU8,
     world: bool,
-    renderer: ImageRenderer<Tile>,
+    renderer: Renderer<Tile>,
 }
 
 /// Worker that renders slippy tiles via the tile renderer.
@@ -365,10 +404,12 @@ impl TileWorker {
                 (TILE_SIZE, f32::from(req.pixel_ratio.get()))
             };
             let size = NonZeroU32::new(size).expect("tile size is non-zero");
-            let mut renderer = ImageRendererBuilder::default()
-                .with_size(size, size)
-                .with_pixel_ratio(ratio)
-                .build_tile_renderer();
+            let mut renderer = Renderer::build(|| {
+                ImageRendererBuilder::default()
+                    .with_size(size, size)
+                    .with_pixel_ratio(ratio)
+                    .build_tile_renderer()
+            });
             renderer.load_style_from_path(&req.style_path)?.wait()?;
             self.slots.truncate(self.capacity.get() - 1);
             self.slots.insert(
@@ -485,7 +526,7 @@ impl Drop for RendererWithOverlay<'_> {
 
 /// A free-camera renderer pinned to a fixed output geometry, with its cached style.
 struct StaticRenderer {
-    renderer: ImageRenderer<Static>,
+    renderer: Renderer<Static>,
     width: u32,
     height: u32,
     pixel_ratio: f32,
@@ -497,10 +538,12 @@ impl StaticRenderer {
         let w = NonZeroU32::new(width).unwrap_or(NonZeroU32::MIN);
         let h = NonZeroU32::new(height).unwrap_or(NonZeroU32::MIN);
         Self {
-            renderer: ImageRendererBuilder::default()
-                .with_pixel_ratio(pixel_ratio)
-                .with_size(w, h)
-                .build_static_renderer(),
+            renderer: Renderer::build(|| {
+                ImageRendererBuilder::default()
+                    .with_pixel_ratio(pixel_ratio)
+                    .with_size(w, h)
+                    .build_static_renderer()
+            }),
             width,
             height,
             pixel_ratio,
@@ -517,7 +560,7 @@ impl StaticRenderer {
 
     fn render(&mut self, params: &RenderParams) -> Result<Image, StyleError> {
         load_style_cached(
-            &mut self.renderer,
+            &mut *self.renderer,
             &mut self.loaded_style,
             &params.style_path,
         )?;
@@ -536,14 +579,14 @@ impl StaticRenderer {
 
         if params.overlays.is_empty() {
             // No overlay: a single render captures the fully-tiled frame.
-            return render_once(&mut self.renderer);
+            return render_once(&mut *self.renderer);
         }
 
         // The overlay's GeoJSON source only tiles once the pipeline has rendered
         // at least once; adding it before any render leaves it blank.
-        let _ = render_once(&mut self.renderer);
+        let _ = render_once(&mut *self.renderer);
 
-        let mut overlay = RendererWithOverlay::apply(&mut self.renderer, &params.overlays)?;
+        let mut overlay = RendererWithOverlay::apply(&mut *self.renderer, &params.overlays)?;
         let renderer = overlay.renderer();
 
         // The source tiles synchronously, so this first render after `add_source`
