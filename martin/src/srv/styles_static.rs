@@ -32,7 +32,7 @@ use crate::srv::overlay_body::parse_overlay;
 use crate::srv::server::DebouncedWarning;
 use crate::srv::styles_rendering::ImageFormatRequest;
 #[cfg(target_os = "linux")]
-use crate::srv::styles_rendering::encode_image_response;
+use crate::srv::styles_rendering::encode_image_response_blocking;
 
 #[derive(Deserialize, Debug)]
 #[cfg_attr(feature = "unstable-schemas", derive(utoipa::IntoParams))]
@@ -420,7 +420,7 @@ async fn handle_static_request(
     let png_max_colors = styles.png_max_colors();
     #[cfg(target_os = "linux")]
     let response = match render_with_overlays(styles, style_path, &camera, size, overlays).await {
-        Ok(image) => encode_image_response(image.as_image(), path.format, png_max_colors),
+        Ok(image) => encode_image_response_blocking(image, path.format, png_max_colors).await,
         Err(resp) => *resp,
     };
     #[cfg(not(target_os = "linux"))]
