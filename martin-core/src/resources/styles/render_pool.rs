@@ -110,14 +110,21 @@ pub struct RenderPools {
 impl RenderPools {
     /// Spawn both pools, each with `workers` threads. See [`RenderPool::new`].
     ///
+    /// Each tile worker keeps up to `renderers_per_worker` (style, pixel ratio) renderers
+    /// loaded; `None` uses [`DEFAULT_RENDERERS_PER_WORKER`].
+    ///
     /// # Errors
     ///
     /// Returns the OS error from [`thread::Builder::spawn`] if a worker thread
     /// cannot be started.
-    pub fn new(workers: Option<NonZeroUsize>) -> Result<Self, std::io::Error> {
+    pub fn new(
+        workers: Option<NonZeroUsize>,
+        renderers_per_worker: Option<NonZeroUsize>,
+    ) -> Result<Self, std::io::Error> {
+        let capacity = renderers_per_worker.unwrap_or(DEFAULT_RENDERERS_PER_WORKER);
         Ok(Self {
-            tile: RenderPool::new(workers)?,
-            free: RenderPool::new(workers)?,
+            tile: RenderPool::new(workers, move || TileWorker::new(capacity))?,
+            free: RenderPool::new(workers, StaticWorker::default)?,
         })
     }
 
@@ -204,15 +211,19 @@ impl<W: Worker> RenderPool<W> {
     ///
     /// `Some(n)` is used as-is with no upper cap. `None` uses the logical CPU
     /// count clamped to 2..=8.
-    fn new(workers: Option<NonZeroUsize>) -> Result<Self, std::io::Error> {
+    fn new<F>(workers: Option<NonZeroUsize>, make_worker: F) -> Result<Self, std::io::Error>
+    where
+        F: Fn() -> W + Clone + Send + 'static,
+    {
         let workers = workers.unwrap_or_else(default_worker_count);
         let (requests, rx) = flume::bounded::<Msg<W::Request>>(workers.get() * WORKER_QUEUE_DEPTH);
         let mut handles = Vec::with_capacity(workers.get());
         for i in 0..workers.get() {
             let rx = rx.clone();
+            let make_worker = make_worker.clone();
             let handle = thread::Builder::new()
                 .name(format!("render-{}-{i}", W::NAME))
-                .spawn(move || worker_loop::<W>(&rx))?;
+                .spawn(move || worker_loop(&rx, &make_worker))?;
             handles.push(handle);
         }
 
@@ -255,8 +266,8 @@ fn default_worker_count() -> NonZeroUsize {
         .clamp(MIN, MAX)
 }
 
-fn worker_loop<W: Worker>(rx: &flume::Receiver<Msg<W::Request>>) {
-    let mut worker = W::default();
+fn worker_loop<W: Worker>(rx: &flume::Receiver<Msg<W::Request>>, make_worker: &dyn Fn() -> W) {
+    let mut worker = make_worker();
     while let Ok(msg) = rx.recv() {
         match msg {
             Msg::Render(request, response) => {
@@ -276,7 +287,7 @@ fn worker_loop<W: Worker>(rx: &flume::Receiver<Msg<W::Request>>) {
                             panic = message,
                             "Render worker panicked, replacing its renderer"
                         );
-                        worker = W::default();
+                        worker = make_worker();
                         Err(StyleError::RenderingPanicked)
                     }
                 };
@@ -289,10 +300,10 @@ fn worker_loop<W: Worker>(rx: &flume::Receiver<Msg<W::Request>>) {
 
 /// A render backend bound to a single worker thread.
 ///
-/// A [`RenderPool`] builds one `Worker` per thread (via [`Default`]) and feeds it
+/// A [`RenderPool`] builds one `Worker` per thread (with its factory) and feeds it
 /// requests. Implementors own a `MapLibre` renderer, which is `!Send`, so it is
 /// created on - and never leaves - its worker thread.
-trait Worker: Default + 'static {
+trait Worker: 'static {
     /// Short name for thread names and log fields (e.g. `tile`, `static`).
     const NAME: &'static str;
     /// The request payload this worker renders.
@@ -314,20 +325,64 @@ struct TileRequest {
     pixel_ratio: NonZeroU8,
 }
 
-/// A tile renderer and the style it currently has loaded.
+/// How many (style, pixel ratio) renderers a tile worker keeps loaded when none is configured.
+pub const DEFAULT_RENDERERS_PER_WORKER: NonZeroUsize = NonZeroUsize::new(8).expect("8 != 0");
+
+/// A tile renderer with its style already loaded.
 struct TileSlot {
+    style_path: PathBuf,
     pixel_ratio: NonZeroU8,
     world: bool,
     renderer: ImageRenderer<Tile>,
-    loaded_style: Option<PathBuf>,
 }
 
 /// Worker that renders slippy tiles via the tile renderer.
 ///
-/// Keeps one renderer per pixel ratio, so mixed-density traffic never rebuilds one.
-#[derive(Default)]
+/// Keeps up to `capacity` renderers, one per (style, pixel ratio), most recently used
+/// first, so mixed traffic does not reload a style on every request.
 struct TileWorker {
+    capacity: NonZeroUsize,
     slots: Vec<TileSlot>,
+}
+
+impl TileWorker {
+    fn new(capacity: NonZeroUsize) -> Self {
+        Self {
+            capacity,
+            slots: Vec::new(),
+        }
+    }
+
+    fn slot(&mut self, req: &TileRequest, world: bool) -> Result<&mut TileSlot, StyleError> {
+        if let Some(i) = self.slots.iter().position(|s| {
+            s.pixel_ratio == req.pixel_ratio && s.world == world && s.style_path == req.style_path
+        }) {
+            self.slots[..=i].rotate_right(1);
+        } else {
+            let (size, ratio) = if world {
+                (TILE_SIZE * 2, f32::from(req.pixel_ratio.get()) / 2.0)
+            } else {
+                (TILE_SIZE, f32::from(req.pixel_ratio.get()))
+            };
+            let size = NonZeroU32::new(size).expect("tile size is non-zero");
+            let mut renderer = ImageRendererBuilder::default()
+                .with_size(size, size)
+                .with_pixel_ratio(ratio)
+                .build_tile_renderer();
+            renderer.load_style_from_path(&req.style_path)?.wait()?;
+            self.slots.truncate(self.capacity.get() - 1);
+            self.slots.insert(
+                0,
+                TileSlot {
+                    style_path: req.style_path.clone(),
+                    pixel_ratio: req.pixel_ratio,
+                    world,
+                    renderer,
+                },
+            );
+        }
+        Ok(&mut self.slots[0])
+    }
 }
 
 impl Worker for TileWorker {
@@ -337,35 +392,9 @@ impl Worker for TileWorker {
     fn render(&mut self, req: TileRequest) -> Result<Image, StyleError> {
         // MapLibre has no zoom below 0, so the 256 px world tile is the 512 px one at half density.
         let world = req.z == 0;
-        let i = match self
-            .slots
-            .iter()
-            .position(|s| s.pixel_ratio == req.pixel_ratio && s.world == world)
-        {
-            Some(i) => i,
-            None => {
-                let (size, ratio) = if world {
-                    (TILE_SIZE * 2, f32::from(req.pixel_ratio.get()) / 2.0)
-                } else {
-                    (TILE_SIZE, f32::from(req.pixel_ratio.get()))
-                };
-                let size = NonZeroU32::new(size).expect("tile size is non-zero");
-                self.slots.push(TileSlot {
-                    pixel_ratio: req.pixel_ratio,
-                    world,
-                    renderer: ImageRendererBuilder::default()
-                        .with_size(size, size)
-                        .with_pixel_ratio(ratio)
-                        .build_tile_renderer(),
-                    loaded_style: None,
-                });
-                self.slots.len() - 1
-            }
-        };
-        let slot = &mut self.slots[i];
-        load_style_cached(&mut slot.renderer, &mut slot.loaded_style, &req.style_path)?;
         let tile_size = if world { TILE_SIZE * 2 } else { TILE_SIZE };
-        slot.renderer
+        self.slot(&req, world)?
+            .renderer
             .render_tile_sized(req.z, req.x, req.y, tile_size)
             .map_err(StyleError::RenderingError)
     }
@@ -564,7 +593,8 @@ mod tests {
     async fn concurrent_tile_renders_all_succeed() {
         let style_file = write_style();
         let pool = Arc::new(
-            RenderPool::<TileWorker>::new(NonZeroUsize::new(4)).expect("spawn render pool"),
+            RenderPool::new(NonZeroUsize::new(4), || TileWorker::new(DEFAULT_RENDERERS_PER_WORKER))
+                .expect("spawn render pool"),
         );
         let style = style_file.path().to_path_buf();
 
@@ -622,7 +652,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_panicking_request_does_not_take_the_worker_with_it() {
-        let pool = RenderPool::<FlakyWorker>::new(NonZeroUsize::new(1)).expect("spawn render pool");
+        let pool = RenderPool::new(NonZeroUsize::new(1), FlakyWorker::default).expect("spawn render pool");
         let first = pool.render(false).await;
         assert!(
             matches!(first, Err(StyleError::RenderingIsDisabled)),
@@ -648,7 +678,7 @@ mod tests {
     async fn static_render_honours_custom_size() {
         let style_file = write_style();
         let pool =
-            RenderPool::<StaticWorker>::new(NonZeroUsize::new(1)).expect("spawn render pool");
+            RenderPool::new(NonZeroUsize::new(1), StaticWorker::default).expect("spawn render pool");
         let style = style_file.path().to_path_buf();
 
         let params = RenderParams::new(style, 0.0, 0.0, 2.0).with_size(256, 384, 1.0);

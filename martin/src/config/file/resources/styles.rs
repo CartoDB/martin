@@ -60,6 +60,11 @@ pub struct RendererConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workers: Option<NonZeroUsize>,
 
+    /// Renderers (one per style and pixel ratio) each tile worker keeps loaded; the least
+    /// recently used is dropped beyond this. Each costs memory. Defaults to 8.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renderers_per_worker: Option<NonZeroUsize>,
+
     /// Highest `@nx` pixel ratio the tile endpoint serves (a tile is `256 · n` px). Defaults to 4.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_pixel_ratio: Option<u8>,
@@ -87,12 +92,12 @@ impl StyleConfig {
             OptBoolObj::Object(ref o) if !o.enabled => results.disable_rendering(),
             OptBoolObj::Bool(true) => {
                 results
-                    .enable_rendering(None)
+                    .enable_rendering(None, None)
                     .map_err(ConfigFileError::RendererPoolSpawnFailed)?;
             }
             OptBoolObj::Object(ref o) => {
                 results
-                    .enable_rendering(o.workers)
+                    .enable_rendering(o.workers, o.renderers_per_worker)
                     .map_err(ConfigFileError::RendererPoolSpawnFailed)?;
                 results.set_max_pixel_ratio(o.max_pixel_ratio.and_then(std::num::NonZeroU8::new));
             }
