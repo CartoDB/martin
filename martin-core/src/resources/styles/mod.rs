@@ -16,7 +16,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 #[cfg(all(feature = "rendering", target_os = "linux"))]
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU8, NonZeroUsize};
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
@@ -38,7 +38,7 @@ pub use error::StyleError;
 #[cfg(all(feature = "rendering", target_os = "linux"))]
 pub mod render_pool;
 #[cfg(all(feature = "rendering", target_os = "linux"))]
-pub use render_pool::{PixelRatio, RenderParams};
+pub use render_pool::RenderParams;
 #[cfg(all(feature = "rendering", target_os = "linux"))]
 use render_pool::RenderPools;
 
@@ -94,7 +94,13 @@ pub struct StyleSources {
     sources: DashMap<String, StyleSource>,
     #[cfg(all(feature = "rendering", target_os = "linux"))]
     pools: Option<RenderPools>,
+    /// Highest `@nx` pixel ratio served by the tile endpoint. `None` means [`DEFAULT_MAX_PIXEL_RATIO`].
+    #[cfg(all(feature = "rendering", target_os = "linux"))]
+    max_pixel_ratio: Option<NonZeroU8>,
 }
+
+/// Highest tile pixel ratio served when none is configured.
+pub const DEFAULT_MAX_PIXEL_RATIO: NonZeroU8 = NonZeroU8::new(4).expect("4 != 0");
 
 /// Style source file.
 #[derive(Clone, Debug)]
@@ -179,7 +185,7 @@ impl StyleSources {
         self.sources.is_empty()
     }
 
-    /// Renders a 256×256 slippy tile (`@2x`: 512×512) via the dedicated tile renderer.
+    /// Renders a 256 px slippy tile (`256 · pixel_ratio` px) via the dedicated tile renderer.
     #[cfg(all(feature = "rendering", target_os = "linux"))]
     pub async fn render(
         &self,
@@ -187,7 +193,7 @@ impl StyleSources {
         z: u8,
         x: u32,
         y: u32,
-        pixel_ratio: PixelRatio,
+        pixel_ratio: NonZeroU8,
     ) -> Result<Image, StyleError> {
         self.pools
             .as_ref()
@@ -221,6 +227,19 @@ impl StyleSources {
     ) -> Result<(), std::io::Error> {
         self.pools = Some(RenderPools::new(workers)?);
         Ok(())
+    }
+
+    /// Limit the tile endpoint to pixel ratios up to `max` (`None` restores the default).
+    #[cfg(all(feature = "rendering", target_os = "linux"))]
+    pub fn set_max_pixel_ratio(&mut self, max: Option<NonZeroU8>) {
+        self.max_pixel_ratio = max;
+    }
+
+    /// Highest pixel ratio the tile endpoint serves.
+    #[cfg(all(feature = "rendering", target_os = "linux"))]
+    #[must_use]
+    pub fn max_pixel_ratio(&self) -> NonZeroU8 {
+        self.max_pixel_ratio.unwrap_or(DEFAULT_MAX_PIXEL_RATIO)
     }
 
     /// Disable rendering. Subsequent render calls return [`StyleError::RenderingIsDisabled`].

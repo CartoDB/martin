@@ -1,4 +1,4 @@
-use std::num::{NonZeroU32, NonZeroUsize};
+use std::num::{NonZeroU8, NonZeroU32, NonZeroUsize};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -121,14 +121,14 @@ impl RenderPools {
         })
     }
 
-    /// Render a 256×256 slippy tile asynchronously, at `pixel_ratio` 1 or 2 (`@2x`).
+    /// Render a slippy tile asynchronously: 256 px at `pixel_ratio` 1, `256 · n` px at `@nx`.
     pub async fn render_tile(
         &self,
         style_path: PathBuf,
         z: u8,
         x: u32,
         y: u32,
-        pixel_ratio: PixelRatio,
+        pixel_ratio: NonZeroU8,
     ) -> Result<Image, StyleError> {
         self.tile
             .render(TileRequest {
@@ -302,16 +302,7 @@ trait Worker: Default + 'static {
     fn render(&mut self, request: Self::Request) -> Result<Image, StyleError>;
 }
 
-/// Output density of a rendered tile: `@1x` (256 px) or `@2x` (512 px).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PixelRatio {
-    /// 256×256 output.
-    X1,
-    /// 512×512 output, the same area drawn at double density.
-    X2,
-}
-
-/// Logical size of a rendered tile; `@2x` doubles the output pixels, not the area.
+/// Logical size of a rendered tile; a pixel ratio of `n` renders `256 · n` pixels of the same area.
 const TILE_SIZE: u32 = 256;
 
 /// A slippy-tile render request.
@@ -320,23 +311,23 @@ struct TileRequest {
     z: u8,
     x: u32,
     y: u32,
-    pixel_ratio: PixelRatio,
+    pixel_ratio: NonZeroU8,
 }
 
 /// A tile renderer and the style it currently has loaded.
-#[derive(Default)]
 struct TileSlot {
-    renderer: Option<ImageRenderer<Tile>>,
+    pixel_ratio: NonZeroU8,
+    world: bool,
+    renderer: ImageRenderer<Tile>,
     loaded_style: Option<PathBuf>,
 }
 
 /// Worker that renders slippy tiles via the tile renderer.
 ///
-/// Keeps one renderer per pixel ratio, so mixed `@1x`/`@2x` traffic never rebuilds one.
+/// Keeps one renderer per pixel ratio, so mixed-density traffic never rebuilds one.
 #[derive(Default)]
 struct TileWorker {
-    x1: TileSlot,
-    x2: TileSlot,
+    slots: Vec<TileSlot>,
 }
 
 impl Worker for TileWorker {
@@ -344,20 +335,38 @@ impl Worker for TileWorker {
     type Request = TileRequest;
 
     fn render(&mut self, req: TileRequest) -> Result<Image, StyleError> {
-        let (slot, ratio) = match req.pixel_ratio {
-            PixelRatio::X1 => (&mut self.x1, 1.0),
-            PixelRatio::X2 => (&mut self.x2, 2.0),
+        // MapLibre has no zoom below 0, so the 256 px world tile is the 512 px one at half density.
+        let world = req.z == 0;
+        let i = match self
+            .slots
+            .iter()
+            .position(|s| s.pixel_ratio == req.pixel_ratio && s.world == world)
+        {
+            Some(i) => i,
+            None => {
+                let (size, ratio) = if world {
+                    (TILE_SIZE * 2, f32::from(req.pixel_ratio.get()) / 2.0)
+                } else {
+                    (TILE_SIZE, f32::from(req.pixel_ratio.get()))
+                };
+                let size = NonZeroU32::new(size).expect("tile size is non-zero");
+                self.slots.push(TileSlot {
+                    pixel_ratio: req.pixel_ratio,
+                    world,
+                    renderer: ImageRendererBuilder::default()
+                        .with_size(size, size)
+                        .with_pixel_ratio(ratio)
+                        .build_tile_renderer(),
+                    loaded_style: None,
+                });
+                self.slots.len() - 1
+            }
         };
-        let renderer = slot.renderer.get_or_insert_with(|| {
-            let size = NonZeroU32::new(TILE_SIZE).expect("tile size is non-zero");
-            ImageRendererBuilder::default()
-                .with_size(size, size)
-                .with_pixel_ratio(ratio)
-                .build_tile_renderer()
-        });
-        load_style_cached(renderer, &mut slot.loaded_style, &req.style_path)?;
-        renderer
-            .render_tile_sized(req.z, req.x, req.y, TILE_SIZE)
+        let slot = &mut self.slots[i];
+        load_style_cached(&mut slot.renderer, &mut slot.loaded_style, &req.style_path)?;
+        let tile_size = if world { TILE_SIZE * 2 } else { TILE_SIZE };
+        slot.renderer
+            .render_tile_sized(req.z, req.x, req.y, tile_size)
             .map_err(StyleError::RenderingError)
     }
 }
@@ -571,6 +580,7 @@ mod tests {
                     z: 0,
                     x: 0,
                     y: 0,
+                    pixel_ratio: NonZeroU8::MIN,
                 })
                 .await
             }));
@@ -579,7 +589,7 @@ mod tests {
         for h in handles {
             let image = h.await.expect("task").expect("render");
             let img = image.as_image();
-            assert_eq!((img.width(), img.height()), (512, 512));
+            assert_eq!((img.width(), img.height()), (256, 256));
             let unique: std::collections::HashSet<_> = img.pixels().copied().collect();
             assert!(unique.len() > 1, "image is blank");
         }

@@ -87,18 +87,17 @@ struct StyleRenderRequest {
     style_id: String,
     z: u8,
     x: u32,
-    /// The row, optionally followed by `@2x` for a double-density tile.
+    /// The row, optionally followed by `@{n}x` for a tile drawn at pixel ratio `n`.
     y: String,
     #[cfg_attr(feature = "unstable-schemas", param(inline))]
     format: ImageFormatRequest,
 }
 
-/// Splits `123` / `123@2x` into the row and the requested pixel ratio.
-fn parse_row(y: &str) -> Option<(u32, martin_core::styles::PixelRatio)> {
-    use martin_core::styles::PixelRatio;
-    match y.strip_suffix("@2x") {
-        Some(row) => Some((row.parse().ok()?, PixelRatio::X2)),
-        None => Some((y.parse().ok()?, PixelRatio::X1)),
+/// Splits `123` / `123@3x` into the row and the requested pixel ratio (1 when absent).
+fn parse_row(y: &str) -> Option<(u32, std::num::NonZeroU8)> {
+    match y.split_once('@') {
+        None => Some((y.parse().ok()?, std::num::NonZeroU8::MIN)),
+        Some((row, ratio)) => Some((row.parse().ok()?, ratio.strip_suffix('x')?.parse().ok()?)),
     }
 }
 
@@ -134,6 +133,12 @@ pub async fn get_rendered_tile_style(
             .content_type(ContentType::plaintext())
             .body("Invalid tile row");
     };
+    #[cfg(target_os = "linux")]
+    if pixel_ratio > styles.max_pixel_ratio() {
+        return HttpResponse::BadRequest()
+            .content_type(ContentType::plaintext())
+            .body(format!("Pixel ratio above @{}x is not served", styles.max_pixel_ratio()));
+    }
     let Some(zxy) = TileCoord::new_checked(path.z, path.x, y) else {
         return HttpResponse::BadRequest()
             .content_type(ContentType::plaintext())
