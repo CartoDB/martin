@@ -53,45 +53,43 @@ impl ImageFormatRequest {
     }
 }
 
-/// [`encode_image_response`] on a blocking thread: palette encoding costs milliseconds of CPU
-/// per tile, which would stall every other request on this actix worker if it ran inline.
+/// Encode `image` into `format` on a blocking thread and wrap it in an [`HttpResponse`].
+///
+/// Palette encoding costs milliseconds of CPU per tile, which would stall every other
+/// request on this actix worker if it ran inline.
 #[cfg(target_os = "linux")]
-pub(super) async fn encode_image_response_blocking(
+pub(super) async fn encode_image_response(
     image: martin_core::styles::StaticImage,
     format: ImageFormatRequest,
     png_max_colors: Option<u16>,
 ) -> HttpResponse {
-    tokio::task::spawn_blocking(move || {
-        encode_image_response(image.as_image(), format, png_max_colors)
-    })
-    .await
-    .unwrap_or_else(|e| {
-        error!("Image encoding task failed: {e}");
-        HttpResponse::InternalServerError()
-            .content_type(ContentType::plaintext())
-            .body("Failed to encode image")
-    })
+    let encoded =
+        tokio::task::spawn_blocking(move || encode_image(image.as_image(), format, png_max_colors))
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r);
+    match encoded {
+        Ok(bytes) => HttpResponse::Ok()
+            .content_type(format.content_type())
+            .body(bytes),
+        Err(e) => {
+            error!("Failed to encode image: {e}");
+            HttpResponse::InternalServerError()
+                .content_type(ContentType::plaintext())
+                .body("Failed to encode image")
+        }
+    }
 }
 
-/// Encode `img` into `format` and wrap it in a successful [`HttpResponse`].
+/// Encode `img` into `format`, as an indexed PNG when `png_max_colors` is set.
 /// JPEG has no alpha channel, so RGBA is flattened to RGB before encoding.
-pub(super) fn encode_image_response(
+fn encode_image(
     img: &image::RgbaImage,
     format: ImageFormatRequest,
     png_max_colors: Option<u16>,
-) -> HttpResponse {
+) -> Result<Vec<u8>, String> {
     if let (ImageFormatRequest::Png, Some(max_colors)) = (format, png_max_colors) {
-        return match crate::srv::png_palette::encode(img, max_colors) {
-            Ok(bytes) => HttpResponse::Ok()
-                .content_type(ContentType::png())
-                .body(bytes),
-            Err(e) => {
-                error!("Failed to encode palette image: {e}");
-                HttpResponse::InternalServerError()
-                    .content_type(ContentType::plaintext())
-                    .body("Failed to encode image")
-            }
-        };
+        return crate::srv::png_palette::encode(img, max_colors);
     }
     let image_format = format.image_format();
     let dynamic_img = DynamicImage::ImageRgba8(img.clone());
@@ -100,19 +98,11 @@ pub(super) fn encode_image_response(
     } else {
         dynamic_img
     };
-
     let mut output = Cursor::new(Vec::new());
-    match to_encode.write_to(&mut output, image_format) {
-        Ok(()) => HttpResponse::Ok()
-            .content_type(format.content_type())
-            .body(output.into_inner()),
-        Err(e) => {
-            error!("Failed to encode image: {e}");
-            HttpResponse::InternalServerError()
-                .content_type(ContentType::plaintext())
-                .body("Failed to encode image")
-        }
-    }
+    to_encode
+        .write_to(&mut output, image_format)
+        .map_err(|e| e.to_string())?;
+    Ok(output.into_inner())
 }
 
 #[derive(Deserialize, Debug)]
@@ -226,9 +216,7 @@ pub async fn get_rendered_tile_style(
             .render_with_pixel_ratio(style_path, zxy.z(), zxy.x(), zxy.y(), pixel_ratio)
             .await
         {
-            Ok(image) => {
-                encode_image_response_blocking(image, path.format, styles.png_max_colors()).await
-            }
+            Ok(image) => encode_image_response(image, path.format, styles.png_max_colors()).await,
             Err(StyleError::RenderingIsDisabled) => rendering_disabled(style_id, zxy),
             Err(e) => {
                 error!("Failed to render style {style_id} at {zxy}: {e}");
