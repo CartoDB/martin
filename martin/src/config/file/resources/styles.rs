@@ -94,7 +94,8 @@ pub struct RendererConfig {
 )]
 #[cfg_attr(feature = "unstable-schemas", derive(schemars::JsonSchema))]
 pub struct PngPaletteConfig {
-    /// Maximum palette size, 2 to 256. Fewer colours means smaller files. Defaults to 32.
+    /// Largest palette size, 2 to 256. Each image gets the smallest palette that matches it
+    /// closely, up to this many colours. Defaults to 128.
     #[serde(default = "PngPaletteConfig::default_max_colors")]
     pub max_colors: u32,
 
@@ -106,7 +107,7 @@ pub struct PngPaletteConfig {
 #[cfg(feature = "rendering")]
 impl PngPaletteConfig {
     const fn default_max_colors() -> u32 {
-        32
+        128
     }
 
     fn clamped_max_colors(&self) -> Option<u16> {
