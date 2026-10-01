@@ -40,9 +40,9 @@ pub use error::StyleError;
 #[cfg(all(feature = "rendering", target_os = "linux"))]
 pub mod render_pool;
 #[cfg(all(feature = "rendering", target_os = "linux"))]
-pub use render_pool::RenderParams;
-#[cfg(all(feature = "rendering", target_os = "linux"))]
 use render_pool::RenderPools;
+#[cfg(all(feature = "rendering", target_os = "linux"))]
+pub use render_pool::{RenderParams, TileSize};
 
 /// What kind of layers a `MapLibre` style draws.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -96,6 +96,9 @@ pub struct StyleSources {
     sources: DashMap<String, StyleSource>,
     #[cfg(all(feature = "rendering", target_os = "linux"))]
     pools: Option<RenderPools>,
+    /// Logical size of rendered tiles.
+    #[cfg(all(feature = "rendering", target_os = "linux"))]
+    tile_size: TileSize,
     /// Highest `@{n}x` pixel ratio served by the tile endpoint. `None` means [`DEFAULT_MAX_PIXEL_RATIO`].
     #[cfg(feature = "rendering")]
     max_pixel_ratio: Option<NonZeroU8>,
@@ -188,7 +191,7 @@ impl StyleSources {
         self.sources.is_empty()
     }
 
-    /// Renders a 512×512 slippy tile via the dedicated tile renderer.
+    /// Renders a slippy tile of the configured [`TileSize`] via the dedicated tile renderer.
     #[cfg(all(feature = "rendering", target_os = "linux"))]
     pub async fn render(&self, path: PathBuf, z: u8, x: u32, y: u32) -> Result<Image, StyleError> {
         self.render_with_pixel_ratio(path, z, x, y, NonZeroU8::MIN)
@@ -208,7 +211,7 @@ impl StyleSources {
         self.pools
             .as_ref()
             .ok_or(StyleError::RenderingIsDisabled)?
-            .render_tile_with_pixel_ratio(path, z, x, y, pixel_ratio)
+            .render_tile_with_pixel_ratio(path, z, x, y, self.tile_size, pixel_ratio)
             .await
     }
 
@@ -237,6 +240,12 @@ impl StyleSources {
     ) -> Result<(), std::io::Error> {
         self.pools = Some(RenderPools::new(workers)?);
         Ok(())
+    }
+
+    /// Render tiles of `tile_size` logical pixels.
+    #[cfg(all(feature = "rendering", target_os = "linux"))]
+    pub fn set_tile_size(&mut self, tile_size: TileSize) {
+        self.tile_size = tile_size;
     }
 
     /// Limit the tile endpoint to pixel ratios up to `max` (`None` restores the default).
