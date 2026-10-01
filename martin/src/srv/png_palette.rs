@@ -7,6 +7,9 @@
 /// Quantise `img` to at most `max_colors` colours and encode it as an indexed PNG.
 pub fn encode(img: &image::RgbaImage, max_colors: u16) -> Result<Vec<u8>, String> {
     let (w, h) = (img.width() as usize, img.height() as usize);
+    if w == 0 || h == 0 {
+        return Err("cannot encode an empty image".to_owned());
+    }
     let qimg = quantizr::Image::new(img.as_raw(), w, h).map_err(|e| e.to_string())?;
     let mut opts = quantizr::Options::default();
     opts.set_max_colors(i32::from(max_colors))

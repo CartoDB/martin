@@ -108,6 +108,17 @@ impl PngPaletteConfig {
     const fn default_max_colors() -> u32 {
         32
     }
+
+    fn clamped_max_colors(&self) -> Option<u16> {
+        let max_colors = self.max_colors.clamp(2, 256);
+        if max_colors != self.max_colors {
+            warn!(
+                "rendering.png_palette.max_colors must be 2 to 256, got {}. Using {max_colors}.",
+                self.max_colors
+            );
+        }
+        u16::try_from(max_colors).ok()
+    }
 }
 
 #[cfg(feature = "rendering")]
@@ -154,7 +165,7 @@ impl StyleConfig {
                 results.set_png_max_colors(
                     o.png_palette
                         .as_ref()
-                        .and_then(|p| u16::try_from(p.max_colors.clamp(2, 256)).ok()),
+                        .and_then(PngPaletteConfig::clamped_max_colors),
                 );
             }
         }
