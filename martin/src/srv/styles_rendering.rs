@@ -7,17 +7,25 @@
 )]
 
 use std::io::Cursor;
+#[cfg(target_os = "linux")]
+use std::num::NonZero;
 use std::num::{IntErrorKind, NonZeroU8};
+#[cfg(target_os = "linux")]
+use std::sync::LazyLock;
 
 use actix_web::http::header::{ContentType, LOCATION};
 use actix_web::web::{Data, Path};
 use actix_web::{HttpResponse, route};
-use image::{DynamicImage, ImageFormat};
+use image::buffer::ConvertBuffer as _;
+use image::{ImageFormat, RgbImage};
 use martin_core::styles::StyleSources;
 use martin_tile_utils::TileCoord;
 use serde::Deserialize;
+#[cfg(target_os = "linux")]
+use tokio::sync::Semaphore;
 use tracing::{error, trace, warn};
 
+use crate::srv::png_palette;
 use crate::srv::server::DebouncedWarning;
 
 /// Image format requested in the URL.
@@ -57,17 +65,28 @@ impl ImageFormatRequest {
 ///
 /// Palette encoding costs milliseconds of CPU per tile, which would stall every other
 /// request on this actix worker if it ran inline.
+/// Bounds concurrent encodes across the process, given that this is CPU bound.
+#[cfg(target_os = "linux")]
+static ENCODE_PERMITS: LazyLock<Semaphore> = LazyLock::new(|| {
+    let cores = std::thread::available_parallelism().map_or(4, NonZero::get);
+    Semaphore::new(cores)
+});
+
 #[cfg(target_os = "linux")]
 pub(super) async fn encode_image_response(
     image: martin_core::styles::StaticImage,
     format: ImageFormatRequest,
     png_max_colors: Option<u16>,
 ) -> HttpResponse {
-    let encoded =
-        tokio::task::spawn_blocking(move || encode_image(image.as_image(), format, png_max_colors))
-            .await
-            .map_err(|e| e.to_string())
-            .and_then(|r| r);
+    let encoded = match ENCODE_PERMITS.acquire().await {
+        Ok(_permit) => tokio::task::spawn_blocking(move || {
+            encode_image(image.as_image(), format, png_max_colors)
+        })
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r),
+        Err(e) => Err(e.to_string()),
+    };
     match encoded {
         Ok(bytes) => HttpResponse::Ok()
             .content_type(format.content_type())
@@ -89,19 +108,17 @@ fn encode_image(
     png_max_colors: Option<u16>,
 ) -> Result<Vec<u8>, String> {
     if let (ImageFormatRequest::Png, Some(max_colors)) = (format, png_max_colors) {
-        return crate::srv::png_palette::encode(img, max_colors);
+        return png_palette::encode(img, max_colors);
     }
     let image_format = format.image_format();
-    let dynamic_img = DynamicImage::ImageRgba8(img.clone());
-    let to_encode = if image_format == ImageFormat::Jpeg {
-        DynamicImage::ImageRgb8(dynamic_img.to_rgb8())
-    } else {
-        dynamic_img
-    };
     let mut output = Cursor::new(Vec::new());
-    to_encode
-        .write_to(&mut output, image_format)
-        .map_err(|e| e.to_string())?;
+    if image_format == ImageFormat::Jpeg {
+        let rgb: RgbImage = img.convert();
+        rgb.write_to(&mut output, image_format)
+    } else {
+        img.write_to(&mut output, image_format)
+    }
+    .map_err(|e| e.to_string())?;
     Ok(output.into_inner())
 }
 
