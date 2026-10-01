@@ -56,6 +56,8 @@ mod styles;
 pub use styles::{__path_get_style_json, get_style_json};
 
 #[cfg(feature = "rendering")]
+mod png_palette;
+#[cfg(feature = "rendering")]
 mod styles_rendering;
 #[cfg(feature = "rendering")]
 pub use styles_rendering::redirect_tile_jpeg;
