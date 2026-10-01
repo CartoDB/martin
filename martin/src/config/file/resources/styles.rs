@@ -60,6 +60,11 @@ pub struct RendererConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workers: Option<NonZeroUsize>,
 
+    /// Renderers (one per style and tile geometry) each tile worker keeps loaded; the least
+    /// recently used is dropped beyond this. Each costs memory. Defaults to 8.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renderers_per_worker: Option<NonZeroUsize>,
+
     /// Size of rendered tiles in logical pixels: 256 or 512. Defaults to 512.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tile_size: Option<u32>,
@@ -87,12 +92,12 @@ impl StyleConfig {
             OptBoolObj::Object(ref o) if !o.enabled => results.disable_rendering(),
             OptBoolObj::Bool(true) => {
                 results
-                    .enable_rendering(None)
+                    .enable_rendering(None, None)
                     .map_err(ConfigFileError::RendererPoolSpawnFailed)?;
             }
             OptBoolObj::Object(ref o) => {
                 results
-                    .enable_rendering(o.workers)
+                    .enable_rendering(o.workers, o.renderers_per_worker)
                     .map_err(ConfigFileError::RendererPoolSpawnFailed)?;
                 results.set_max_pixel_ratio(o.max_pixel_ratio);
                 results.set_tile_size(match o.tile_size {
