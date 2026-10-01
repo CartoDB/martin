@@ -129,17 +129,18 @@ impl RenderPools {
         x: u32,
         y: u32,
     ) -> Result<Image, StyleError> {
-        self.render_tile_with_pixel_ratio(style_path, z, x, y, NonZeroU8::MIN)
+        self.render_tile_with_pixel_ratio(style_path, z, x, y, TileSize::default(), NonZeroU8::MIN)
             .await
     }
 
-    /// Render a slippy tile asynchronously at `pixel_ratio` times the pixels of [`Self::render_tile`].
+    /// Render a `tile_size` px slippy tile asynchronously at `pixel_ratio` times the pixels.
     pub async fn render_tile_with_pixel_ratio(
         &self,
         style_path: PathBuf,
         z: u8,
         x: u32,
         y: u32,
+        tile_size: TileSize,
         pixel_ratio: NonZeroU8,
     ) -> Result<Image, StyleError> {
         self.tile
@@ -148,6 +149,7 @@ impl RenderPools {
                 z,
                 x,
                 y,
+                tile_size,
                 pixel_ratio,
             })
             .await
@@ -314,18 +316,39 @@ trait Worker: Default + 'static {
     fn render(&mut self, request: Self::Request) -> Result<Image, StyleError>;
 }
 
+/// Size of a rendered tile in logical pixels, before the pixel ratio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TileSize {
+    /// 256 px tiles, as most raster tile clients expect.
+    Px256,
+    /// 512 px tiles, the native `MapLibre` tile size.
+    #[default]
+    Px512,
+}
+
+impl TileSize {
+    fn px(self) -> u32 {
+        match self {
+            Self::Px256 => 256,
+            Self::Px512 => 512,
+        }
+    }
+}
+
 /// A slippy-tile render request.
 struct TileRequest {
     style_path: PathBuf,
     z: u8,
     x: u32,
     y: u32,
+    tile_size: TileSize,
     pixel_ratio: NonZeroU8,
 }
 
-/// A tile renderer for one pixel ratio and the style it currently has loaded.
+/// A tile renderer for one geometry and the style it currently has loaded.
 struct TileSlot {
-    pixel_ratio: NonZeroU8,
+    size: u32,
+    pixel_ratio: f32,
     renderer: ImageRenderer<Tile>,
     loaded_style: Option<PathBuf>,
 }
@@ -343,17 +366,27 @@ impl Worker for TileWorker {
     type Request = TileRequest;
 
     fn render(&mut self, req: TileRequest) -> Result<Image, StyleError> {
+        let mut size = req.tile_size.px();
+        let mut pixel_ratio = f32::from(req.pixel_ratio.get());
+        // MapLibre has no zoom below 0: the 256 px world tile is the 512 px one at half density.
+        if req.z == 0 && size == 256 {
+            size = 512;
+            pixel_ratio /= 2.0;
+        }
         let i = if let Some(i) = self
             .slots
             .iter()
-            .position(|s| s.pixel_ratio == req.pixel_ratio)
+            .position(|s| s.size == size && s.pixel_ratio.to_bits() == pixel_ratio.to_bits())
         {
             i
         } else {
+            let px = NonZeroU32::new(size).expect("tile size is non-zero");
             self.slots.push(TileSlot {
-                pixel_ratio: req.pixel_ratio,
+                size,
+                pixel_ratio,
                 renderer: ImageRendererBuilder::default()
-                    .with_pixel_ratio(f32::from(req.pixel_ratio.get()))
+                    .with_size(px, px)
+                    .with_pixel_ratio(pixel_ratio)
                     .build_tile_renderer(),
                 loaded_style: None,
             });
@@ -362,7 +395,7 @@ impl Worker for TileWorker {
         let slot = &mut self.slots[i];
         load_style_cached(&mut slot.renderer, &mut slot.loaded_style, &req.style_path)?;
         slot.renderer
-            .render_tile(req.z, req.x, req.y)
+            .render_tile_sized(req.z, req.x, req.y, size)
             .map_err(StyleError::RenderingError)
     }
 }
@@ -576,6 +609,7 @@ mod tests {
                     z: 0,
                     x: 0,
                     y: 0,
+                    tile_size: TileSize::default(),
                     pixel_ratio: NonZeroU8::MIN,
                 })
                 .await
@@ -604,6 +638,7 @@ mod tests {
                     z: 0,
                     x: 0,
                     y: 0,
+                    tile_size: TileSize::default(),
                     pixel_ratio: NonZeroU8::new(pixel_ratio).expect("non-zero"),
                 })
                 .await

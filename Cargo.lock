@@ -5493,9 +5493,8 @@ dependencies = [
 
 [[package]]
 name = "maplibre_native"
-version = "0.9.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d446b3c5a43e227d3ace7c70739252362ae70e3571548063d434f0c2368d3267"
+version = "0.9.4"
+source = "git+https://github.com/CartoDB/maplibre-native-rs?branch=carto#7f70377cd33ec6d99039c03ab733c7438db65653"
 dependencies = [
  "cmake",
  "cxx",

@@ -60,6 +60,10 @@ pub struct RendererConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workers: Option<NonZeroUsize>,
 
+    /// Size of rendered tiles in logical pixels: 256 or 512. Defaults to 512.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tile_size: Option<u32>,
+
     /// Highest `@{n}x` pixel ratio the tile endpoint serves. \[default: 4\]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_pixel_ratio: Option<NonZeroU8>,
@@ -91,6 +95,14 @@ impl StyleConfig {
                     .enable_rendering(o.workers)
                     .map_err(ConfigFileError::RendererPoolSpawnFailed)?;
                 results.set_max_pixel_ratio(o.max_pixel_ratio);
+                results.set_tile_size(match o.tile_size {
+                    None | Some(512) => martin_core::styles::TileSize::Px512,
+                    Some(256) => martin_core::styles::TileSize::Px256,
+                    Some(other) => {
+                        warn!("rendering.tile_size must be 256 or 512, got {other}. Using 512.");
+                        martin_core::styles::TileSize::Px512
+                    }
+                });
             }
         }
         #[cfg(all(feature = "rendering", not(target_os = "linux")))]
