@@ -395,7 +395,7 @@ impl Worker for TileWorker {
         let slot = &mut self.slots[i];
         load_style_cached(&mut slot.renderer, &mut slot.loaded_style, &req.style_path)?;
         slot.renderer
-            .render_tile_sized(req.z, req.x, req.y, size)
+            .render_tile(req.z, req.x, req.y)
             .map_err(StyleError::RenderingError)
     }
 }

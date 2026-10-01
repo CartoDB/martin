@@ -5494,7 +5494,7 @@ dependencies = [
 [[package]]
 name = "maplibre_native"
 version = "0.9.4"
-source = "git+https://github.com/CartoDB/maplibre-native-rs?branch=carto#7f70377cd33ec6d99039c03ab733c7438db65653"
+source = "git+https://github.com/CartoDB/maplibre-native-rs?branch=carto#b2b6de3ef084c7904ae5bd815e228f0cc0644ff6"
 dependencies = [
  "cmake",
  "cxx",
