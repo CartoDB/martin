@@ -50,6 +50,35 @@ styles:
         tile_size: 512
         # Highest @{n}x pixel ratio served for XYZ tiles [default: 4]
         max_pixel_ratio: 4
+        # Indexed PNG palette; `false` keeps full-color RGBA [default: max_colors 128]
+        png_palette:
+            max_colors: 128
+```
+
+## Indexed (palette) PNG
+
+Rendered PNG tiles and static images are indexed (palette) PNGs.
+For map tiles they are about a quarter of the size of full-color RGBA, with no visible difference.
+JPEG and WebP are not affected.
+
+Each image gets the smallest palette that stays close to the full-color render, up to `max_colors` (2 to 256, default 128).
+Encoding a tile this way takes a few milliseconds of CPU.
+
+```yaml
+styles:
+    rendering:
+        enabled: true
+        png_palette:
+            max_colors: 64
+```
+
+Set `png_palette: false` for full-color RGBA PNGs, for example for imagery or styles with smooth gradients:
+
+```yaml
+styles:
+    rendering:
+        enabled: true
+        png_palette: false
 ```
 
 ## Rendered XYZ tiles
