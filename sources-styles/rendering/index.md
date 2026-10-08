@@ -1,0 +1,293 @@
+# Server-side raster tile rendering
+
+Martin can render a [style](<https://maplibre.org/martin/sources-styles/index.md>) into raster images server-side: as XYZ tiles, or as a single static image at a chosen camera.
+
+> [!WARNING]
+>
+> Rendering is **not** part of the default build. It relies on `maplibre_native`, which links pre-compiled native libraries with strict runtime requirements. We only ship it where we control the runtime environment. You get it by either:
+>
+> - using the **`-full` Docker image** variant, tagged `:latest-full`, or the matching `-full` Linux-gnu release tarball, or
+> - building from source with the `rendering` feature enabled (Linux only): `cargo install martin --features rendering`.
+>
+> The default Docker image, the default release binaries, and `cargo install martin` do **not** include rendering.
+>
+> Limitations of our current implementation:
+>
+> - Rendering support is currently only available on Linux. To add support for macOS/Windows, please see [https://github.com/maplibre/maplibre-native-rs](<https://github.com/maplibre/maplibre-native-rs>).
+> - Martin does not cache rendered requests.
+
+To enable rendering, you need a build that includes it (see above) and to turn it on in the configuration file:
+
+```yaml
+styles:
+    rendering: true
+```
+
+Renders run on a dedicated thread pool. `rendering: true` sizes it from the logical CPU count, clamped to `2..=8`. The long form sets the number of render threads explicitly, how many [renderers](<#renderers-per-worker>) each keeps, the [tile size](<#tile-size>), and the highest [pixel ratio](<#pixel-ratio>) tiles are served at:
+
+```yaml
+styles:
+    rendering:
+        enabled: true
+        workers: 4
+        # Renderers each worker keeps loaded, one per style and pixel ratio [default: 8]
+        renderers_per_worker: 8
+        # Width and height of XYZ tiles in pixels: 256 or 512 [default: 512]
+        tile_size: 512
+        # Highest @{n}x pixel ratio served for XYZ tiles [default: 4]
+        max_pixel_ratio: 4
+        # Indexed PNG palette; `false` keeps full-color RGBA [default: max_colors 128]
+        png_palette:
+            max_colors: 128
+```
+
+## Indexed (palette) PNG
+
+Rendered PNG tiles and static images are indexed (palette) PNGs. For map tiles they are about a quarter of the size of full-color RGBA, with no visible difference. JPEG and WebP are not affected.
+
+Each image gets the smallest palette that stays close to the full-color render, up to `max_colors` (2 to 256, default 128). Encoding a tile this way takes a few milliseconds of CPU.
+
+```yaml
+styles:
+    rendering:
+        enabled: true
+        png_palette:
+            max_colors: 64
+```
+
+Set `png_palette: false` for full-color RGBA PNGs, for example for imagery or styles with smooth gradients:
+
+```yaml
+styles:
+    rendering:
+        enabled: true
+        png_palette: false
+```
+
+## Rendered XYZ tiles
+
+We support generating a rasterized image for an XYZ tile of a given style.
+
+After enabling rendering, you can use the `/style/<style_id>/{z}/{x}/{y}.{filetype}` API to get a `<style_id>`'s rendered png/jpeg content.
+
+### Tile size
+
+Tiles are 512×512 px by default, the size MapLibre uses. Set `tile_size: 256` to serve 256×256 px tiles, the size most other raster clients (such as Leaflet or OpenLayers) expect by default. Any other value fails at startup.
+
+### Pixel ratio
+
+For high-density (retina) screens, add `@{n}x` after the row to draw the same tile at `n` times the pixels: `/style/<style_id>/{z}/{x}/{y}@2x.png` is twice `tile_size` wide and high (1024×1024 px with the default 512), `@3x` three times. `n` is a whole number from 1 up to `max_pixel_ratio` (4 unless configured): `@5x` is answered with `400 Bad Request`, and a malformed suffix such as `@0x` or `@1.5x` with `404 Not Found`.
+
+In Leaflet, this is the `{r}`-placeholder (`/style/<style_id>/{z}/{x}/{y}{r}.png`), which means that on a retina screen, you get the crisp map your users expect.
+
+### Renderers per worker
+
+Each render worker keeps a renderer for every style and pixel ratio it has been asked for, up to `renderers_per_worker` (8 unless configured). Beyond that, the least recently used one is dropped, and loaded again the next time it is needed. With `tile_size: 256`, the zoom 0 tile takes one more renderer per pixel ratio.
+
+Reloading styles costs CPU on every request that misses, so set `renderers_per_worker` to at least the number of styles times the pixel ratios you serve. Each renderer holds its own memory: lower `renderers_per_worker` or `max_pixel_ratio` to reduce memory usage.
+
+## Static images
+
+> [!NOTE]
+>
+> **Info**
+>
+> We currently do not have the same [capabilities as Tileserver-GL](<https://tileserver.readthedocs.io/en/latest/endpoints.html#static-images>) to layout images. We are working on adding this feature and are very open to contributions if you want to help!
+
+> [!WARNING]
+>
+> Static rendering shares the limitations listed above (Linux only, no caching).
+
+Martin can render a single PNG/JPEG/WebP of a style at a chosen camera. The same URL is served by two methods:
+
+```http
+GET  /style/{style_id}/static/{camera}/{size}.{ext}
+POST /style/{style_id}/static/{camera}/{size}.{ext}
+```
+
+`GET` returns the base map alone. `POST` additionally accepts a GeoJSON `FeatureCollection` in the body, with styling on each feature's `properties`, and overlays those features on top of the base style for that single render. An empty or missing body is equivalent to `GET`.
+
+### Camera
+
+The `{camera}` segment chooses what the image looks at:
+
+| Form | Meaning |
+| --- | --- |
+| `lon,lat,zoom` | Center at `(lon, lat)` and `zoom` (north up, flat). |
+| `lon,lat,zoom@bearing` | Center + bearing in degrees (clockwise from north). |
+| `lon,lat,zoom@bearing,pitch` | Center + bearing + pitch in degrees. |
+| `minLon,minLat,maxLon,maxLat` | Fit the given bounding box to the requested size. |
+
+> [!NOTE]
+>
+> **Info**
+>
+> The image is always rendered INSIDE of the requested size. So if the bbox is `[-10°,-1°,10°,1°]` and size `500x500` is requested, the image will be centered on 0,0 with a 500x500 box that is fully inside the bbox, so the left-top most pixel is approximately at `1°,-1°`. We will not expand the image outside the bbox.
+
+### Size and format
+
+`{size}.{ext}` follows the `WIDTHxHEIGHT[@{scale}x].{ext}` pattern, e.g. `800x600.png`, `400x300@2x.jpg`. Allowed extensions are `png`, `jpg`, and `webp`. Width and height are capped at 2048 px each; scale is capped at `4x`.
+
+### Overlay body (`POST`)
+
+The overlay body is a GeoJSON `FeatureCollection`. Each feature carries its style on `properties` using [MapLibre Style Spec](<https://maplibre.org/maplibre-style-spec/>) paint/layout property names (`circle-*`, `line-*`, `fill-*`). Any property left unset falls back to MapLibre's own default.
+
+```json
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": { "type": "LineString",
+        "coordinates": [[-10, 5], [10, 5]] },
+      "properties": { "line-color": "#f00", "line-width": 3, "line-cap": "round" }
+    },
+    {
+      "type": "Feature",
+      "geometry": { "type": "Point", "coordinates": [0, 0] },
+      "properties": { "circle-color": "#00f", "circle-radius": 8 }
+    },
+    {
+      "type": "Feature",
+      "geometry": { "type": "Polygon",
+        "coordinates": [[[-5,-5],[5,-5],[5,5],[-5,5],[-5,-5]]] },
+      "properties": { "fill-color": "#0a0", "fill-opacity": 0.5 }
+    }
+  ]
+}
+```
+
+How features become layers:
+
+- **Point / MultiPoint** -\> one `circle` layer.
+- **LineString / MultiLineString** -\> one `line` layer.
+- **Polygon / MultiPolygon** -\> a `fill` layer (unless only `line-*` properties are set), plus a `line` layer when any `line-*` property is present (so a polygon with `line-color` gets an outline of `line-width`).
+- `GeometryCollection` and features with `geometry: null` are silently skipped.
+
+Anything the server can't make sense of is rejected with `400 Bad Request`: a malformed body, a top-level `type` that isn't `FeatureCollection`, a member `type` that isn't `Feature`, an invalid CSS color, a non-numeric width, or an unknown `line-cap`/`line-join` enum value. Unknown property keys on `feature.properties` are **silently ignored**, so GeoJSON files that already carry application metadata (`id`, `name`, `title`, `description`, …) work without modification.
+
+#### Supported style properties
+
+Every property is optional; an unset property uses the [MapLibre Style Spec](<https://maplibre.org/maplibre-style-spec/>) default.
+
+| MapLibre property | Applies to | MapLibre default |
+| --- | --- | --- |
+| `circle-color` | Point | `#000000` |
+| `circle-opacity` | Point | `1` |
+| `circle-radius` | Point | `5` |
+| `circle-stroke-color` | Point | `#000000` |
+| `circle-stroke-opacity` | Point | `1` |
+| `circle-stroke-width` | Point | `0` |
+| `line-color` | LineString / Polygon | `#000000` |
+| `line-opacity` | LineString / Polygon | `1` |
+| `line-width` | LineString / Polygon | `1` |
+| `line-cap` | LineString / Polygon | `butt` |
+| `line-join` | LineString / Polygon | `miter` |
+| `fill-color` | Polygon | `#000000` |
+| `fill-opacity` | Polygon | `1` |
+| `fill-outline-color` | Polygon | matches `fill-color` |
+
+`line-cap` is one of `butt`, `round`, `square`; `line-join` is one of `miter`, `bevel`, `round`. Colors accept any CSS color string.
+
+Range checks are not enforced - `*-opacity` values outside `0..=1` and negative widths are passed through to MapLibre verbatim.
+
+#### Out of scope
+
+- Data-driven expressions on individual feature properties (each feature becomes its own GeoJSON source and layer with literal paint values).
+- Layer types beyond `fill` / `line` / `circle` (no `symbol`, `heatmap`, `raster`, `fill-extrusion`).
+- Externally-referenced GeoJSON URLs (every feature is inline).
+- Symbol/icon markers (no `symbol` layer) - use a `circle` instead.
+- Z-ordering relative to base style layers - all overlay layers are drawn on top of the base style, in feature-array order.
+
+All examples below render the same camera (`/static/0,0,2/200x200.png`) against the `maplibre_demo` style, so the visual differences come only from the overlay body.
+
+#### Line
+
+```json
+{
+  "type": "FeatureCollection",
+  "features": [{
+    "type": "Feature",
+    "geometry": {
+      "type": "LineString",
+      "coordinates": [[-10.0, -10.0], [10.0, 10.0]]
+    },
+    "properties": {
+      "line-color": "#95BEFA",
+      "line-width": 5,
+      "line-cap": "round",
+      "line-join": "round"
+    }
+  }]
+}
+```
+
+#### Fill
+
+```json
+{
+  "type": "FeatureCollection",
+  "features": [{
+    "type": "Feature",
+    "geometry": {
+      "type": "Polygon",
+      "coordinates": [[
+        [-10.0, -10.0], [10.0, -10.0],
+        [10.0, 10.0], [-10.0, 10.0],
+        [-10.0, -10.0]
+      ]]
+    },
+    "properties": {
+      "fill-color": "red",
+      "fill-opacity": 1.0
+    }
+  }]
+}
+```
+
+#### Fill opacity (alpha blending)
+
+```json
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": { "type": "Polygon",
+        "coordinates": [[[-40, -20], [10, -20], [10, 20], [-40, 20], [-40, -20]]] },
+      "properties": {
+        "fill-color": "#285DAA",
+        "fill-opacity": 0.5
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": { "type": "Polygon",
+        "coordinates": [[[-10, -20], [40, -20], [40, 20], [-10, 20], [-10, -20]]] },
+      "properties": {
+        "fill-color": "#95BEFA",
+        "fill-opacity": 0.5
+      }
+    }
+  ]
+}
+```
+
+#### Circle (marker)
+
+```json
+{
+  "type": "FeatureCollection",
+  "features": [{
+    "type": "Feature",
+    "geometry": {
+      "type": "Point",
+      "coordinates": [0.0, 0.0]
+    },
+    "properties": {
+      "circle-color": "#285DAA",
+      "circle-radius": 8
+    }
+  }]
+}
+```

@@ -6,7 +6,7 @@
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       
-        <meta name="description" content="Documentation for Martin Tile Server">
+        <meta name="description" content="Upgrading from Martin 1.x to 2.0">
       
       
         <meta name="author" content="Maplibre Contributors">
@@ -25,7 +25,7 @@
       
       
       <link rel="icon" href="../images/favicon.ico">
-      <meta name="generator" content="zensical-0.0.67">
+      <meta name="generator" content="zensical-0.0.68">
     
     
       
@@ -36,12 +36,12 @@
       
         
       
-      <link rel="stylesheet" href="../assets/stylesheets/modern/main.4ae390e2.min.css">
+      <link rel="stylesheet" href="../assets/stylesheets/modern/main.595f2bf5.min.css">
       
         
           
         
-        <link rel="stylesheet" href="../assets/stylesheets/modern/palette.96d1a7e4.min.css">
+        <link rel="stylesheet" href="../assets/stylesheets/modern/palette.b27955a4.min.css">
       
       
   
@@ -131,7 +131,19 @@
 
     
     
-  </head>
+  <meta property="og:type" content="website" />
+<meta property="og:title" content="Migration Guide - Martin Tile Server Documentation" />
+<meta property="og:description" content="Upgrading from Martin 1.x to 2.0" />
+<meta property="og:image" content="https://maplibre.org/martin/assets/images/social/migration-guide.png" />
+<meta property="og:image:type" content="image/png" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta property="og:url" content="https://maplibre.org/martin/migration-guide/" />
+<meta property="twitter:card" content="summary_large_image" />
+<meta property="twitter:title" content="Migration Guide - Martin Tile Server Documentation" />
+<meta property="twitter:description" content="Upgrading from Martin 1.x to 2.0" />
+<meta property="twitter:image" content="https://maplibre.org/martin/assets/images/social/migration-guide.png" />
+</head>
   
   
     
@@ -146,14 +158,11 @@
     
     <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
     <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
-    <label class="md-overlay" for="__drawer" aria-label="Navigation"></label>
+    <label class="md-overlay" for="__drawer" aria-hidden="true"></label>
     <div data-md-component="skip">
-      
-        
-        <a href="#migration-guide" class="md-skip">
-          Skip to content
-        </a>
-      
+      <a href="#__skip" class="md-skip">
+        Skip to content
+      </a>
     </div>
     <div data-md-component="announce">
       
@@ -168,8 +177,7 @@
   <nav class="md-header__inner md-grid" aria-label="Header">
     <a href="./.." title="Martin Tile Server Documentation" class="md-header__button md-logo" aria-label="Martin Tile Server Documentation" data-md-component="logo">
       
-  
-  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 5v16M20.001 19A2 2 0 0 0 22 17V5a2 2 0 0 0-1.999-2L16 3.002A5 5 0 0 0 12 5a5 5 0 0 0-4-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 1.999 2H8a5 5 0 0 1 4 2 5 5 0 0 1 4-2z"/></svg>
+  <img src="../images/logo.svg" alt="Martin Tile Server Documentation">
 
     </a>
     <label class="md-header__button md-icon" for="__drawer" aria-label="Navigation">
@@ -566,8 +574,7 @@
   <label class="md-nav__title" for="__drawer">
     <a href="./.." title="Martin Tile Server Documentation" class="md-nav__button md-logo" aria-label="Martin Tile Server Documentation" data-md-component="logo">
       
-  
-  <svg xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" class="lucide lucide-book-open" viewBox="0 0 24 24"><path d="M12 5v16M20.001 19A2 2 0 0 0 22 17V5a2 2 0 0 0-1.999-2L16 3.002A5 5 0 0 0 12 5a5 5 0 0 0-4-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 1.999 2H8a5 5 0 0 1 4 2 5 5 0 0 1 4-2z"/></svg>
+  <img src="../images/logo.svg" alt="Martin Tile Server Documentation">
 
     </a>
     Martin Tile Server Documentation
@@ -1212,6 +1219,28 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#x86_64-binaries-require-an-x86-64-v3-cpu" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        x86_64 binaries require an x86-64-v3 CPU
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cargo-features-were-merged" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Cargo features were merged
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#for-users-of-the-crates" class="md-nav__link">
     <span class="md-ellipsis">
       <span class="md-typeset">
@@ -1281,6 +1310,7 @@
 
               
               <article class="md-content__inner md-typeset">
+                <a id="__skip" tabindex="-1"></a>
                 
                   
 
@@ -1482,6 +1512,40 @@ Use <code>RUST_LOG</code> to control logging.</p>
 <p>For server-side style rendering on Linux, use the <code>-full</code> Docker image (<code>:latest-full</code> or <code>:&lt;version&gt;-full</code>), a <code>-full</code> Linux-gnu tarball, or <code>cargo install martin --features rendering</code>. The default builds no longer include rendering.</p>
 <p>Rendering is stable as of 2.0. The configuration is unchanged. Set <code>styles.rendering: true</code> to enable it, or keep your existing rendering options.</p>
 <p>See <a href="../sources-styles/rendering/">Server-side raster tile rendering</a> and <a href="../installation/">Installation</a>.</p>
+<h3 id="x86_64-binaries-require-an-x86-64-v3-cpu">x86_64 binaries require an x86-64-v3 CPU</h3>
+<p>The prebuilt x86_64 binaries, Debian package and Docker images are built for the x86-64-v3 feature level (AVX2, BMI2, FMA; Intel Haswell / AMD Excavator, 2015 or newer).
+On older CPUs they fail with an illegal instruction error. aarch64 builds are unaffected.</p>
+<p>To run Martin on an older CPU, use the <code>martin-x86_64-unknown-linux-musl-legacycpu.tar.gz</code> release asset or the <code>:latest-legacycpu</code> Docker image, or <a href="../development/">build it from source</a> without <code>-C target-cpu=x86-64-v3</code>.</p>
+<h3 id="cargo-features-were-merged">Cargo features were merged</h3>
+<p>If you build Martin or <code>martin-core</code> yourself with <code>--features</code> or <code>--no-default-features</code>, rename the features:</p>
+<table>
+<thead>
+<tr>
+<th>1.x features</th>
+<th>2.0 feature</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>fonts</code>, <code>sprites</code>, <code>styles</code></td>
+<td><code>resources</code></td>
+</tr>
+<tr>
+<td><code>hillshade</code>, <code>contour</code>, <code>geojson</code></td>
+<td><code>processing</code></td>
+</tr>
+<tr>
+<td><code>mlt</code></td>
+<td>none, always enabled</td>
+</tr>
+</tbody>
+</table>
+<p>Both are enabled by default, so default builds, release binaries and Docker images are unchanged. <code>metrics</code>, <code>webui</code>, <code>tui</code>, <code>lambda</code> and the source features <code>postgres</code>, <code>pmtiles</code>, <code>mbtiles</code> and <code>passthrough</code> keep their names.</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="c1"># 1.x</span>
+</span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>cargo<span class="w"> </span>install<span class="w"> </span>martin<span class="w"> </span>--locked<span class="w"> </span>--no-default-features<span class="w"> </span>--features<span class="w"> </span>postgres,fonts,sprites,styles
+</span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="c1"># 2.0</span>
+</span><span id="__span-8-4"><a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a>cargo<span class="w"> </span>install<span class="w"> </span>martin<span class="w"> </span>--locked<span class="w"> </span>--no-default-features<span class="w"> </span>--features<span class="w"> </span>postgres,resources
+</span></code></pre></div>
 <h3 id="for-users-of-the-crates">For users of the crates</h3>
 <ul>
 <li>In <code>martin-tile-utils</code>, <code>TileCoord</code> fields are private. Construct coordinates with <code>TileCoord::new_checked</code> or <code>TileCoord::new_unchecked</code> and read them with <code>z()</code>, <code>x()</code> and <code>y()</code>.</li>
@@ -1627,7 +1691,8 @@ Use <code>RUST_LOG</code> to control logging.</p>
       <div class="md-dialog__inner md-typeset"></div>
     </div>
     
-      <div class="md-progress" data-md-component="progress" role="progressbar"></div>
+      
+<div class="md-progress" data-md-component="progress" role="progressbar" aria-label="Loading"></div>
     
     
     
@@ -1640,7 +1705,7 @@ Use <code>RUST_LOG</code> to control logging.</p>
       <script id="__config" type="application/json">{"annotate":null,"base":"..","features":["announce.dismiss","content.action.edit","content.code.annotate","content.code.copy","content.code.select","content.footnote.tooltips","content.tabs.link","content.tooltips","header.autohide","navigation.expand","navigation.footer","navigation.indexes","navigation.instant","navigation.instant.prefetch","navigation.instant.progress","navigation.path","navigation.prune","navigation.sections","navigation.tabs","navigation.tabs.sticky","navigation.top","navigation.tracking","search.highlight","toc.follow","toc.integrate"],"redirect":null,"search":"../assets/javascripts/workers/search.7d14d953.min.js","tags":null,"translations":{"clipboard.copied":"Copied to clipboard","clipboard.copy":"Copy to clipboard","clipboard.error":"Could not copy to clipboard","search.result.more.one":"1 more on this page","search.result.more.other":"# more on this page","search.result.none":"No matching documents","search.result.one":"1 matching document","search.result.other":"# matching documents","search.result.placeholder":"Type to start searching","search.result.term.missing":"Missing","select.version":"Select version"},"version":null}</script>
     
     
-      <script src="../assets/javascripts/bundle.67a597eb.min.js"></script>
+      <script src="../assets/javascripts/bundle.3c842f4c.min.js"></script>
       
         <script src="../javascripts/keys.js"></script>
       
