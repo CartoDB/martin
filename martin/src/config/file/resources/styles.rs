@@ -78,8 +78,8 @@ pub struct RendererConfig {
     pub tile_size: Option<TileSize>,
 
     /// MiB of `MapLibre`'s cache of the tiles, glyphs and sprites renderers fetch over the
-    /// network. `0` disables it, worth it when every source is served by Martin itself.
-    /// Unset keeps `MapLibre`'s default (50 MiB).
+    /// network \[default: 50, 0 to disable\]. Disabling it pays off when every source of the
+    /// styles is served by Martin itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "unstable-schemas", schemars(example = &0))]
     pub ambient_cache_size_mb: Option<u64>,

@@ -51,7 +51,7 @@ styles:
         tile_size: 512
         # Highest @{n}x pixel ratio served for XYZ tiles [default: 4]
         max_pixel_ratio: 4
-        # MiB of MapLibre Native's cache of fetched tiles, glyphs and sprites; 0 disables it [default: 50]
+        # MiB of MapLibre Native's cache of fetched tiles, glyphs and sprites [default: 50, 0 to disable]
         ambient_cache_size_mb: 50
         # Indexed PNG palette; `false` keeps full-color RGBA [default: max_colors 128]
         png_palette:
