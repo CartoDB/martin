@@ -133,10 +133,7 @@ impl RenderPools {
                 TileWorker::new(renderers_per_worker).with_ambient_cache(ambient_cache_bytes)
             })?,
             tile_size,
-            free: RenderPool::new(workers, move || StaticWorker {
-                current: None,
-                ambient_cache_bytes,
-            })?,
+            free: RenderPool::new(workers, move || StaticWorker::new(ambient_cache_bytes))?,
         })
     }
 
@@ -469,6 +466,15 @@ struct StaticWorker {
     /// Rebuilt whenever the requested output geometry changes.
     current: Option<StaticRenderer>,
     ambient_cache_bytes: Option<u64>,
+}
+
+impl StaticWorker {
+    fn new(ambient_cache_bytes: Option<u64>) -> Self {
+        Self {
+            current: None,
+            ambient_cache_bytes,
+        }
+    }
 }
 
 impl Worker for StaticWorker {
