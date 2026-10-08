@@ -51,6 +51,8 @@ styles:
         tile_size: 512
         # Highest @{n}x pixel ratio served for XYZ tiles [default: 4]
         max_pixel_ratio: 4
+        # MiB of MapLibre Native's cache of fetched tiles, glyphs and sprites; 0 disables it [default: 50]
+        ambient_cache_size_mb: 50
         # Indexed PNG palette; `false` keeps full-color RGBA [default: max_colors 128]
         png_palette:
             max_colors: 128
@@ -110,6 +112,13 @@ With `tile_size: 256`, the zoom 0 tile takes one more renderer per pixel ratio.
 
 Reloading styles costs CPU on every request that misses, so set `renderers_per_worker` to at least the number of styles times the pixel ratios you serve.
 Each renderer holds its own memory: lower `renderers_per_worker` or `max_pixel_ratio` to reduce memory usage.
+
+### Ambient cache
+
+MapLibre Native keeps the tiles, glyphs and sprites its renderers fetch over the network in a cache of its own, in memory and shared by all of them, up to `ambient_cache_size_mb` (50 unless configured).
+Every fetched resource is compressed and stored there, and every fetch looks it up first.
+When the style's sources are Martin's own, the tiles are already a local read away, so `ambient_cache_size_mb: 0` saves that work.
+Keep it for styles that fetch from other servers.
 
 ## Static images
 

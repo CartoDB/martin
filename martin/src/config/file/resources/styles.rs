@@ -77,6 +77,13 @@ pub struct RendererConfig {
     #[cfg_attr(feature = "unstable-schemas", schemars(example = &TileSize::Px256))]
     pub tile_size: Option<TileSize>,
 
+    /// MiB of `MapLibre`'s cache of the tiles, glyphs and sprites renderers fetch over the
+    /// network. `0` disables it, worth it when every source is served by Martin itself.
+    /// Unset keeps `MapLibre`'s default (50 MiB).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "unstable-schemas", schemars(example = &0))]
+    pub ambient_cache_size_mb: Option<u64>,
+
     /// Highest `@{n}x` pixel ratio the tile endpoint serves. \[default: 4\]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "unstable-schemas", schemars(example = &4))]
@@ -197,7 +204,12 @@ impl StyleConfig {
             OptBoolObj::Object(ref o) if !o.enabled => results.disable_rendering(),
             OptBoolObj::Bool(true) => {
                 results
-                    .enable_rendering(None, TileSize::default(), DEFAULT_RENDERERS_PER_WORKER)
+                    .enable_rendering(
+                        None,
+                        TileSize::default(),
+                        DEFAULT_RENDERERS_PER_WORKER,
+                        None,
+                    )
                     .map_err(ConfigFileError::RendererPoolSpawnFailed)?;
                 results.set_png_max_colors(RendererConfig::default().png_max_colors());
             }
@@ -208,6 +220,8 @@ impl StyleConfig {
                         o.tile_size.unwrap_or_default(),
                         o.renderers_per_worker
                             .unwrap_or(DEFAULT_RENDERERS_PER_WORKER),
+                        o.ambient_cache_size_mb
+                            .map(|mb| mb.saturating_mul(1024 * 1024)),
                     )
                     .map_err(ConfigFileError::RendererPoolSpawnFailed)?;
                 results.set_max_pixel_ratio(o.max_pixel_ratio);
@@ -466,6 +480,20 @@ mod tests {
             panic!("expected Object variant, got {:?}", cfg.rendering);
         };
         assert_eq!(renderer.renderers_per_worker, NonZeroUsize::new(32));
+    }
+
+    #[cfg(feature = "rendering")]
+    #[rstest::rstest]
+    #[case::disabled("0", Some(0))]
+    #[case::sized("128", Some(128))]
+    fn renderer_config_parses_ambient_cache_size_mb(#[case] value: &str, #[case] mb: Option<u64>) {
+        let yaml = format!("rendering:\n  enabled: true\n  ambient_cache_size_mb: {value}\n");
+        let cfg: InnerStyleConfig =
+            serde_saphyr::from_str(&yaml).expect("rendering with ambient_cache_size_mb must parse");
+        let OptBoolObj::Object(renderer) = cfg.rendering else {
+            panic!("expected Object variant, got {:?}", cfg.rendering);
+        };
+        assert_eq!(renderer.ambient_cache_size_mb, mb);
     }
 
     #[cfg(feature = "rendering")]
