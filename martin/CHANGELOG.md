@@ -7,10 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- `styles.rendering.tile_cache_size` sets how many tiles of each source a renderer keeps once they are out of view. Fewer save memory when requests rarely ask for neighbouring tiles.
-
 ## [2.0.0-beta.4](https://github.com/maplibre/martin/compare/martin-v2.0.0-beta.3...martin-v2.0.0-beta.4) - 2026-10-22
 
 > [!NOTE]
