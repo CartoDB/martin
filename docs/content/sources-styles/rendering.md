@@ -126,8 +126,8 @@ Keep it for styles that fetch from other servers.
 ### Tile cache
 
 Each renderer keeps the source tiles it laid out for a while after they leave the view, so that the next request for a nearby tile does not lay them out again: by default as many as MapLibre Native keeps for a map that pans and zooms (11 per source for 512 px tiles).
-They are most of a renderer's memory.
-When requests rarely ask for neighbouring tiles, for example behind a CDN that only forwards the tiles it does not have, `tile_cache_size: 2` keeps most of that memory free for little extra CPU.
+They take a good part of a renderer's memory.
+When requests rarely ask for neighbouring tiles, for example behind a CDN that only forwards the tiles it does not have, `tile_cache_size: 2` frees most of it for little extra CPU.
 Keep the default when clients ask Martin directly for the tiles of a map view.
 
 ## Static images
