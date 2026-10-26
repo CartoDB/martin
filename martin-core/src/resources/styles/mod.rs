@@ -42,7 +42,7 @@ pub mod render_pool;
 #[cfg(all(feature = "rendering", target_os = "linux"))]
 use render_pool::RenderPools;
 #[cfg(all(feature = "rendering", target_os = "linux"))]
-pub use render_pool::{DEFAULT_RENDERERS_PER_WORKER, RenderParams};
+pub use render_pool::{DEFAULT_RENDERERS_PER_WORKER, RenderParams, RendererOptions};
 
 #[cfg(feature = "rendering")]
 mod tile_size;
@@ -237,13 +237,13 @@ impl StyleSources {
         workers: Option<NonZeroUsize>,
         tile_size: TileSize,
         renderers_per_worker: NonZeroUsize,
-        ambient_cache_bytes: Option<u64>,
+        renderer_options: RendererOptions,
     ) -> Result<(), std::io::Error> {
         self.pools = Some(RenderPools::new(
             workers,
             tile_size,
             renderers_per_worker,
-            ambient_cache_bytes,
+            renderer_options,
         )?);
         Ok(())
     }

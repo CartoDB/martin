@@ -38,7 +38,7 @@ styles:
 
 Renders run on a dedicated thread pool.
 `rendering: true` sizes it from the logical CPU count, clamped to `2..=8`.
-The long form sets the number of render threads explicitly, how many [renderers](#renderers-per-worker) each keeps, the [tile size](#tile-size), the highest [pixel ratio](#pixel-ratio) tiles are served at, and the size of the [ambient cache](#ambient-cache):
+The long form sets the number of render threads explicitly, how many [renderers](#renderers-per-worker) each keeps, the [tile size](#tile-size), the highest [pixel ratio](#pixel-ratio) tiles are served at, the size of the [ambient cache](#ambient-cache) and of the [tile cache](#tile-cache):
 
 ```yaml
 styles:
@@ -53,6 +53,8 @@ styles:
         max_pixel_ratio: 4
         # MB of MapLibre Native's cache of fetched tiles, glyphs and sprites, 0 to disable [default: 50 MiB]
         ambient_cache_size_mb: 0
+        # Tiles of each source a renderer keeps once out of view [default: MapLibre Native's, 11 for 512 px tiles]
+        tile_cache_size: 2
         # Indexed PNG palette; `false` keeps full-color RGBA [default: max_colors 128]
         png_palette:
             max_colors: 128
@@ -120,6 +122,13 @@ Every fetched resource is compressed and stored there, and every fetch looks it 
 A cached resource spares a request only while its `Cache-Control` says it is fresh, and Martin sends none unless `cache_control` is set in the [configuration file](../config-file/index.md).
 When the style's sources are Martin's own, the tiles are already a local read away, so `ambient_cache_size_mb: 0` saves that work.
 Keep it for styles that fetch from other servers.
+
+### Tile cache
+
+Each renderer keeps the source tiles it laid out for a while after they leave the view, so that the next request for a nearby tile does not lay them out again: by default as many as MapLibre Native keeps for a map that pans and zooms (11 per source for 512 px tiles).
+They are most of a renderer's memory.
+When requests rarely ask for neighbouring tiles, for example behind a CDN that only forwards the tiles it does not have, `tile_cache_size: 2` keeps most of that memory free for little extra CPU.
+Keep the default when clients ask Martin directly for the tiles of a map view.
 
 ## Static images
 

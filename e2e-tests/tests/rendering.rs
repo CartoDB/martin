@@ -681,6 +681,47 @@ async fn the_ambient_cache_answers_a_reloaded_renderer(#[case] ambient_cache: &s
     cassette.assert_no_misses();
 }
 
+/// A renderer keeps the source tiles of a render it has moved away from in its tile cache, so
+/// coming back to them does not fetch them again, unless the cache keeps none.
+#[rstest]
+#[case::by_default("", 1)]
+#[case::none("tile_cache_size: 0", 2)]
+#[tokio::test]
+async fn the_tile_cache_keeps_the_tiles_of_previous_renders(#[case] tile_cache: &str, #[case] fetches: usize) {
+    let cassette = Cassette::serving_fresh_for(UPSTREAMS, 3600).await;
+    let maplibre_demo = cassette.style(fixture("styles/maplibre_demo.json"));
+    let maplibre_demo = maplibre_demo.display();
+    let mut martin = Martin::builder()
+        .config(&formatdoc! {"
+            styles:
+              rendering:
+                enabled: true
+                workers: 1
+                ambient_cache_size_mb: 0
+                {tile_cache}
+              sources:
+                maplibre_demo: {maplibre_demo}
+        "})
+        .start()
+        .await
+        .expect("failed to start martin");
+
+    for tile in ["1/0/0", "0/0/0", "1/0/0"] {
+        rendered(&martin, &format!("/style/maplibre_demo/{tile}.png")).await;
+    }
+
+    let log = cassette.request_log().await;
+    let tile = "GET /demotiles.maplibre.org/tiles/1/0/0.pbf";
+    assert_eq!(
+        log.lines().filter(|line| *line == tile).count(),
+        fetches,
+        "times the tile 1/0/0 was fetched; requests:\n{log}"
+    );
+
+    stop_and_take_rendering_log(&mut martin).await;
+    cassette.assert_no_misses();
+}
+
 #[tokio::test]
 async fn neighbouring_tiles_render_differently() {
     let cassette = Cassette::serving(UPSTREAMS).await;

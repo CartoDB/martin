@@ -115,8 +115,7 @@ impl RenderPools {
     /// Each tile worker keeps up to `renderers_per_worker` renderers loaded, one per style
     /// and tile geometry.
     ///
-    /// `ambient_cache_bytes` caps `MapLibre`'s cache of the resources renderers fetch
-    /// over the network; `Some(0)` disables it and `None` keeps `MapLibre`'s default.
+    /// `renderer_options` are the [`RendererOptions`] of every renderer the pools create.
     ///
     /// # Errors
     ///
@@ -126,14 +125,14 @@ impl RenderPools {
         workers: Option<NonZeroUsize>,
         tile_size: TileSize,
         renderers_per_worker: NonZeroUsize,
-        ambient_cache_bytes: Option<u64>,
+        renderer_options: RendererOptions,
     ) -> Result<Self, std::io::Error> {
         Ok(Self {
             tile: RenderPool::new(workers, move || {
-                TileWorker::new(renderers_per_worker).with_ambient_cache(ambient_cache_bytes)
+                TileWorker::new(renderers_per_worker).with_renderer_options(renderer_options)
             })?,
             tile_size,
-            free: RenderPool::new(workers, move || StaticWorker::new(ambient_cache_bytes))?,
+            free: RenderPool::new(workers, move || StaticWorker::new(renderer_options))?,
         })
     }
 
@@ -348,26 +347,37 @@ impl Geometry {
         }
     }
 
-    fn renderer(self, ambient_cache_bytes: Option<u64>) -> ImageRenderer<Tile> {
+    fn renderer(self, renderer_options: RendererOptions) -> ImageRenderer<Tile> {
         let (size, pixel_ratio) = match self {
             Self::Tile(size, ratio) => (size, f32::from(ratio.get())),
             Self::World256(ratio) => (TileSize::Px512, f32::from(ratio.get()) / 2.0),
         };
-        renderer_builder(ambient_cache_bytes)
+        renderer_builder(renderer_options)
             .with_size(size.px(), size.px())
             .with_pixel_ratio(pixel_ratio)
             .build_tile_renderer()
     }
 }
 
-/// A renderer builder whose ambient cache holds up to `ambient_cache_bytes`
-/// (`None` keeps `MapLibre`'s default, `Some(0)` disables it).
-fn renderer_builder(ambient_cache_bytes: Option<u64>) -> ImageRendererBuilder {
-    let builder = ImageRendererBuilder::default();
-    match ambient_cache_bytes {
-        Some(bytes) => builder.with_resource_options(ResourceOptions::default().with_maximum_cache_size(bytes)),
-        None => builder,
+/// Settings of the `MapLibre` renderers a [`RenderPools`] creates. `None` keeps `MapLibre`'s default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RendererOptions {
+    /// Size in bytes of `MapLibre`'s cache of the resources renderers fetch over the network
+    /// (`Some(0)` disables it).
+    pub ambient_cache_bytes: Option<u64>,
+    /// Tiles of each source a renderer keeps once they are out of view, to reuse them in later renders.
+    pub tile_cache_size: Option<usize>,
+}
+
+fn renderer_builder(renderer_options: RendererOptions) -> ImageRendererBuilder {
+    let mut builder = ImageRendererBuilder::default();
+    if let Some(bytes) = renderer_options.ambient_cache_bytes {
+        builder = builder.with_resource_options(ResourceOptions::default().with_maximum_cache_size(bytes));
     }
+    if let Some(tiles) = renderer_options.tile_cache_size {
+        builder = builder.with_tile_cache_size(tiles);
+    }
+    builder
 }
 
 /// How many renderers a tile worker keeps loaded when none is configured.
@@ -386,7 +396,7 @@ struct TileSlot {
 /// so mixed traffic does not reload a style on every request.
 struct TileWorker {
     capacity: NonZeroUsize,
-    ambient_cache_bytes: Option<u64>,
+    renderer_options: RendererOptions,
     slots: Vec<TileSlot>,
 }
 
@@ -394,13 +404,13 @@ impl TileWorker {
     fn new(capacity: NonZeroUsize) -> Self {
         Self {
             capacity,
-            ambient_cache_bytes: None,
+            renderer_options: RendererOptions::default(),
             slots: Vec::new(),
         }
     }
 
-    fn with_ambient_cache(mut self, ambient_cache_bytes: Option<u64>) -> Self {
-        self.ambient_cache_bytes = ambient_cache_bytes;
+    fn with_renderer_options(mut self, renderer_options: RendererOptions) -> Self {
+        self.renderer_options = renderer_options;
         self
     }
 
@@ -415,7 +425,7 @@ impl TileWorker {
             // so the `truncate` below always drops the least recently used renderer.
             self.slots[..=i].rotate_right(1);
         } else {
-            let mut renderer = geometry.renderer(self.ambient_cache_bytes);
+            let mut renderer = geometry.renderer(self.renderer_options);
             renderer.load_style_from_path(style_path)?.wait()?;
             self.slots.truncate(self.capacity.get() - 1);
             self.slots.insert(
@@ -448,14 +458,14 @@ impl Worker for TileWorker {
 struct StaticWorker {
     /// Rebuilt whenever the requested output geometry changes.
     current: Option<StaticRenderer>,
-    ambient_cache_bytes: Option<u64>,
+    renderer_options: RendererOptions,
 }
 
 impl StaticWorker {
-    fn new(ambient_cache_bytes: Option<u64>) -> Self {
+    fn new(renderer_options: RendererOptions) -> Self {
         Self {
             current: None,
-            ambient_cache_bytes,
+            renderer_options,
         }
     }
 }
@@ -470,7 +480,7 @@ impl Worker for StaticWorker {
                 params.width,
                 params.height,
                 params.pixel_ratio,
-                self.ambient_cache_bytes,
+                self.renderer_options,
             ));
         }
         self.current.as_mut().expect("just built").render(&params)
@@ -544,11 +554,11 @@ struct StaticRenderer {
 }
 
 impl StaticRenderer {
-    fn new(width: u32, height: u32, pixel_ratio: f32, ambient_cache_bytes: Option<u64>) -> Self {
+    fn new(width: u32, height: u32, pixel_ratio: f32, renderer_options: RendererOptions) -> Self {
         let w = NonZeroU32::new(width).unwrap_or(NonZeroU32::MIN);
         let h = NonZeroU32::new(height).unwrap_or(NonZeroU32::MIN);
         Self {
-            renderer: renderer_builder(ambient_cache_bytes)
+            renderer: renderer_builder(renderer_options)
                 .with_pixel_ratio(pixel_ratio)
                 .with_size(w, h)
                 .build_static_renderer(),

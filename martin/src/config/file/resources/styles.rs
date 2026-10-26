@@ -3,11 +3,11 @@ use std::num::{NonZeroU8, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::{env, mem};
 
-#[cfg(all(feature = "rendering", target_os = "linux"))]
-use martin_core::styles::DEFAULT_RENDERERS_PER_WORKER;
 use martin_core::styles::StyleSources;
 #[cfg(feature = "rendering")]
 use martin_core::styles::TileSize;
+#[cfg(all(feature = "rendering", target_os = "linux"))]
+use martin_core::styles::{DEFAULT_RENDERERS_PER_WORKER, RendererOptions};
 use martin_core::walk_files;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -66,6 +66,13 @@ pub struct RendererConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "unstable-schemas", schemars(example = &50))]
     pub ambient_cache_size_mb: Option<u64>,
+
+    /// Tiles of each source a renderer keeps once they are out of view, to reuse them for nearby tiles.
+    /// Fewer save memory when requests rarely ask for neighbouring tiles, e.g. behind a CDN.
+    /// \[default: `MapLibre`'s, 11 for 512 px tiles\]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "unstable-schemas", schemars(example = &2))]
+    pub tile_cache_size: Option<usize>,
 
     /// Highest `@{n}x` pixel ratio the tile endpoint serves. \[default: 4\]
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -159,6 +166,16 @@ impl RendererConfig {
         self.ambient_cache_size_mb.map(|mb| mb.saturating_mul(1000 * 1000))
     }
 
+    /// Settings of the `MapLibre` renderers.
+    #[cfg(target_os = "linux")]
+    #[must_use]
+    pub fn renderer_options(&self) -> RendererOptions {
+        RendererOptions {
+            ambient_cache_bytes: self.ambient_cache_bytes(),
+            tile_cache_size: self.tile_cache_size,
+        }
+    }
+
     /// Palette size for rendered PNGs, or `None` to keep RGBA.
     #[must_use]
     pub fn png_max_colors(&self) -> Option<u16> {
@@ -182,7 +199,12 @@ impl StyleConfig {
             OptBoolObj::Object(ref o) if !o.enabled => results.disable_rendering(),
             OptBoolObj::Bool(true) => {
                 results
-                    .enable_rendering(None, TileSize::default(), DEFAULT_RENDERERS_PER_WORKER, None)
+                    .enable_rendering(
+                        None,
+                        TileSize::default(),
+                        DEFAULT_RENDERERS_PER_WORKER,
+                        RendererOptions::default(),
+                    )
                     .map_err(ConfigFileError::RendererPoolSpawnFailed)?;
                 results.set_png_max_colors(RendererConfig::default().png_max_colors());
             }
@@ -192,7 +214,7 @@ impl StyleConfig {
                         o.workers,
                         o.tile_size.unwrap_or_default(),
                         o.renderers_per_worker.unwrap_or(DEFAULT_RENDERERS_PER_WORKER),
-                        o.ambient_cache_bytes(),
+                        o.renderer_options(),
                     )
                     .map_err(ConfigFileError::RendererPoolSpawnFailed)?;
                 results.set_max_pixel_ratio(o.max_pixel_ratio);
