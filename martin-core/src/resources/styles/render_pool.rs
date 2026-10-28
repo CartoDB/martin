@@ -490,9 +490,15 @@ impl Worker for TileWorker {
 
     fn render(&mut self, req: TileRequest) -> Result<Image, StyleError> {
         let geometry = Geometry::of(&req);
-        self.slot(&req.style, geometry)?
+        let result = self
+            .slot(&req.style, geometry)?
             .renderer
-            .render(geometry.camera(req.z, req.x, req.y))
+            .render(geometry.camera(req.z, req.x, req.y));
+        if result.as_ref().is_err_and(spoils_renderer) {
+            // `slot` moved the renderer that failed to the front.
+            self.slots.remove(0);
+        }
+        result
     }
 }
 
@@ -524,9 +530,20 @@ impl Worker for StaticWorker {
                 current.insert(StaticRenderer::new(&self.runtime, width, height, params.pixel_ratio)?)
             }
         };
-        renderer.resize(width, height)?;
-        renderer.render(&params)
+        let result = renderer.resize(width, height).and_then(|()| renderer.render(&params));
+        if result.as_ref().is_err_and(spoils_renderer) {
+            self.current = None;
+        }
+        result
     }
+}
+
+/// Whether `err` may leave the renderer that returned it unable to render again, so it must be rebuilt.
+///
+/// A render that timed out still has its still image pending, and `MapLibre` refuses another
+/// until it ends. Errors about the request itself, such as a bad overlay, leave the renderer as it was.
+fn spoils_renderer(err: &StyleError) -> bool {
+    matches!(err, StyleError::RenderingError(_) | StyleError::RenderTimeout { .. })
 }
 
 /// Loads `style` into `renderer`, skipping the load if it is already the cached style.
@@ -895,6 +912,63 @@ mod tests {
             .expect("render at zoom -2");
 
         assert!(at_zoom_0 == below_zoom_0, "zoom -2 renders differently from zoom 0");
+    }
+
+    /// A style whose tiles come from a server that accepts connections and never answers,
+    /// so `MapLibre` never finishes a render. Keep the listener alive while rendering.
+    fn hanging_style() -> (std::net::TcpListener, RenderStyle) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("local address").port();
+        let style = format!(
+            r#"{{
+                "version": 8,
+                "sources": {{"hang": {{"type": "vector", "tiles": ["http://127.0.0.1:{port}/{{z}}/{{x}}/{{y}}.pbf"]}}}},
+                "layers": [{{"id": "hang", "type": "fill", "source": "hang", "source-layer": "hang"}}]
+            }}"#
+        );
+        (listener, RenderStyle::Json(style.into()))
+    }
+
+    const SHORT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+    #[test]
+    fn a_tile_render_that_times_out_gives_its_renderer_up() {
+        let (_listener, hanging) = hanging_style();
+        let runtime = Arc::new(Runtime::new(None).expect("start runtime").with_timeout(SHORT_TIMEOUT));
+        let mut worker = TileWorker::new(runtime, DEFAULT_RENDERERS_PER_WORKER);
+        let tile = |style: &RenderStyle| TileRequest {
+            style: style.clone(),
+            z: 1,
+            x: 0,
+            y: 0,
+            tile_size: TileSize::Px512,
+            pixel_ratio: NonZeroU8::MIN,
+        };
+
+        let err = worker.render(tile(&hanging)).err();
+        assert!(matches!(err, Some(StyleError::RenderTimeout { .. })), "{err:?}");
+        assert!(worker.slots.is_empty());
+
+        let style = write_style();
+        worker
+            .render(tile(&style.path().to_path_buf().into()))
+            .expect("render after a timeout");
+    }
+
+    #[test]
+    fn a_static_render_that_times_out_gives_its_renderer_up() {
+        let (_listener, hanging) = hanging_style();
+        let runtime = Arc::new(Runtime::new(None).expect("start runtime").with_timeout(SHORT_TIMEOUT));
+        let mut worker = StaticWorker::new(runtime);
+
+        let err = worker.render(RenderParams::new(hanging, 0.0, 0.0, 1.0)).err();
+        assert!(matches!(err, Some(StyleError::RenderTimeout { .. })), "{err:?}");
+        assert!(worker.current.is_none());
+
+        let style = write_style();
+        worker
+            .render(RenderParams::new(style.path().to_path_buf(), 0.0, 0.0, 1.0))
+            .expect("render after a timeout");
     }
 
     struct FlakyWorker;

@@ -147,6 +147,7 @@ In Leaflet, this is the `{r}`-placeholder (`/style/<style_id>/{z}/{x}/{y}{r}.png
 Each render worker keeps a renderer for every style and pixel ratio it has been asked for, up to `renderers_per_worker` (8 unless configured).
 Beyond that, the least recently used one is dropped, and loaded again the next time it is needed.
 With `tile_size: 256`, the zoom 0 tile takes one more renderer per pixel ratio.
+A renderer that fails to render is dropped too, and so is one that MapLibre Native leaves waiting for more than 30 seconds, for example on a source that never answers: the request fails, and the next one for that style loads it again.
 
 Reloading styles costs CPU on every request that misses, so set `renderers_per_worker` to at least the number of styles times the pixel ratios you serve.
 Each renderer holds its own memory: lower `renderers_per_worker` or list fewer `pixel_ratios` to reduce memory usage.
