@@ -477,10 +477,16 @@ impl Worker for TileWorker {
     type Request = TileRequest;
 
     fn render(&mut self, req: TileRequest) -> Result<Image, StyleError> {
-        self.slot(&req.style, Geometry::of(&req))?
+        let result = self
+            .slot(&req.style, Geometry::of(&req))?
             .renderer
-            .render_tile(req.z, req.x, req.y)
-            .map_err(StyleError::RenderingError)
+            .render_tile(req.z, req.x, req.y);
+        if result.is_err() {
+            // A render that failed can leave its map waiting for a resource it never requests
+            // again (a glyph range that answered 404), and the next render on it never finishes.
+            self.slots.remove(0);
+        }
+        result.map_err(StyleError::RenderingError)
     }
 }
 
@@ -514,7 +520,12 @@ impl Worker for StaticWorker {
                 self.ambient_cache_bytes,
             ));
         }
-        self.current.as_mut().expect("just built").render(&params)
+        let result = self.current.as_mut().expect("just built").render(&params);
+        if matches!(result, Err(StyleError::RenderingError(_))) {
+            // Same as `TileWorker::render`: the failed map may never finish another render.
+            self.current = None;
+        }
+        result
     }
 }
 
@@ -625,7 +636,7 @@ impl StaticRenderer {
 
         // The overlay's GeoJSON source only tiles once the pipeline has rendered
         // at least once; adding it before any render leaves it blank.
-        let _ = render_once(&mut self.renderer);
+        render_once(&mut self.renderer)?;
 
         let mut overlay = RendererWithOverlay::apply(&mut self.renderer, &params.overlays)?;
         let renderer = overlay.renderer();
@@ -866,6 +877,81 @@ mod tests {
         let after = pool.render(false).await;
         assert!(matches!(after, Err(StyleError::RenderingIsDisabled)), "{after:?}");
         assert_eq!(WORKERS_BUILT.load(Ordering::SeqCst), before + 1);
+    }
+
+    /// A style whose only label needs a glyph range that is not in `glyphs`, so every render of it fails.
+    fn missing_glyphs_style(glyphs: &std::path::Path) -> RenderStyle {
+        let glyphs = format!("file://{}/{{fontstack}}/{{range}}.pbf", glyphs.display());
+        let style = serde_json::json!({
+            "version": 8,
+            "glyphs": glyphs,
+            "sources": {"label": {"type": "geojson", "data": {
+                "type": "Feature",
+                "properties": {"name": "東京"},
+                "geometry": {"type": "Point", "coordinates": [0, 0]}
+            }}},
+            "layers": [
+                {"id": "bg", "type": "background", "paint": {"background-color": "#ffffff"}},
+                {"id": "label", "type": "symbol", "source": "label",
+                 "layout": {"text-field": ["get", "name"], "text-font": ["Missing Font"]}}
+            ]
+        });
+        RenderStyle::Json(style.to_string().into())
+    }
+
+    /// Renders `request`, failing the test instead of hanging when the worker is stuck.
+    async fn render_within_a_minute<W: Worker>(pool: &RenderPool<W>, request: W::Request) -> Result<Image, StyleError> {
+        if let Ok(result) = tokio::time::timeout(std::time::Duration::from_mins(1), pool.render(request)).await {
+            return result;
+        }
+        // Dropping the last pool handle joins the stuck worker.
+        std::mem::forget(pool.clone());
+        panic!("render did not finish");
+    }
+
+    #[tokio::test]
+    async fn a_tile_that_failed_on_a_missing_glyph_range_does_not_wedge_its_worker() {
+        let glyphs = tempfile::tempdir().expect("glyph dir");
+        let pool = RenderPool::new(NonZeroUsize::new(1), || TileWorker::new(DEFAULT_RENDERERS_PER_WORKER))
+            .expect("spawn render pool");
+        let tile = |style: RenderStyle| TileRequest {
+            style,
+            z: 0,
+            x: 0,
+            y: 0,
+            tile_size: TileSize::Px512,
+            pixel_ratio: NonZeroU8::MIN,
+        };
+
+        for _ in 0..2 {
+            let result = render_within_a_minute(&pool, tile(missing_glyphs_style(glyphs.path()))).await;
+            assert!(matches!(result, Err(StyleError::RenderingError(_))), "{result:?}");
+        }
+        let style_file = write_style();
+        render_within_a_minute(&pool, tile(style_file.path().to_path_buf().into()))
+            .await
+            .expect("a style without labels still renders");
+    }
+
+    #[tokio::test]
+    async fn an_overlay_on_a_style_missing_a_glyph_range_does_not_wedge_its_worker() {
+        let glyphs = tempfile::tempdir().expect("glyph dir");
+        let pool = RenderPool::new(NonZeroUsize::new(1), StaticWorker::default).expect("spawn render pool");
+        let overlay = Arc::new(OverlaySpec {
+            features: vec![crate::overlay::OverlayFeature {
+                geometry: Some(
+                    serde_json::from_value(serde_json::json!({"type": "Point", "coordinates": [0, 0]})).expect("point"),
+                ),
+                properties: None,
+            }],
+        });
+
+        for _ in 0..2 {
+            let params = RenderParams::new(missing_glyphs_style(glyphs.path()), 0.0, 0.0, 2.0)
+                .with_overlays(Arc::clone(&overlay));
+            let result = render_within_a_minute(&pool, params).await;
+            assert!(matches!(result, Err(StyleError::RenderingError(_))), "{result:?}");
+        }
     }
 
     #[tokio::test]
