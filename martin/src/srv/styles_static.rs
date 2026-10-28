@@ -505,6 +505,7 @@ async fn render_with_overlays(
             | StyleError::GraphicsUnavailable { .. }
             | StyleError::FailedToSendRequest
             | StyleError::FailedToReceiveResponse
+            | StyleError::RenderTimeout { .. }
             | StyleError::RenderingPanicked) => {
                 error!(error = %other, "Failed to render static image");
                 HttpResponse::InternalServerError()

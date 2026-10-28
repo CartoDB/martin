@@ -45,6 +45,14 @@ pub enum StyleError {
     #[error("Failed to receive response from rendering thread")]
     FailedToReceiveResponse,
 
+    /// `MapLibre` did not finish a step of the render in time.
+    #[cfg(all(feature = "rendering", target_os = "linux"))]
+    #[error("MapLibre did not finish rendering within {after:?}")]
+    RenderTimeout {
+        /// How long the renderer waited.
+        after: std::time::Duration,
+    },
+
     /// The renderer panicked while handling the request.
     #[cfg(all(feature = "rendering", target_os = "linux"))]
     #[error("Rendering thread panicked while handling the request")]
