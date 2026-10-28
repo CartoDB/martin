@@ -333,10 +333,15 @@ impl<W: Worker> RenderPool<W> {
                 .min_by_key(|&w| (load[w].load(Relaxed), usize::from(w != home)))
                 .unwrap_or(home);
             let floor = load[least].load(Relaxed) + k;
+            let _ = second;
+            let held = holders_mask(key);
+            let holder = (0..n)
+                .filter(|&w| w != home && held & (1 << w.min(63)) != 0)
+                .min_by_key(|&w| load[w].load(Relaxed));
             let pick = if load[home].load(Relaxed) <= floor {
                 home
-            } else if load[second].load(Relaxed) <= floor {
-                second
+            } else if let Some(h) = holder.filter(|&h| load[h].load(Relaxed) <= floor) {
+                h
             } else {
                 least
             };
@@ -371,6 +376,7 @@ fn worker_loop<W: Worker>(
     index: usize,
     new_worker: &dyn Fn() -> W,
 ) {
+    WORKER_INDEX.with(|c| c.set(index));
     let mut worker = new_worker();
     loop {
         let (msg, mine) = match own.try_recv() {
@@ -378,10 +384,14 @@ fn worker_loop<W: Worker>(
             Err(_) => match flume::Selector::new()
                 .recv(own, |m| (m, true))
                 .recv(rx, |m| (m, false))
-                .wait()
+                .wait_timeout(std::time::Duration::from_secs(1))
             {
-                (Ok(msg), mine) => (msg, mine),
-                (Err(_), _) => break,
+                Ok((Ok(msg), mine)) => (msg, mine),
+                Ok((Err(_), _)) => break,
+                Err(_) => {
+                    worker.tick();
+                    continue;
+                }
             },
         };
         match msg {
@@ -433,6 +443,9 @@ trait Worker: 'static {
     fn affinity(_request: &Self::Request) -> Option<u64> {
         None
     }
+
+    /// Called about once a second while the worker is idle.
+    fn tick(&mut self) {}
 }
 
 /// A slippy-tile render request.
@@ -502,11 +515,50 @@ fn tile_center(z: u8, x: u32, y: u32) -> LatLng {
 /// How many renderers a tile worker keeps loaded when none is configured.
 pub const DEFAULT_RENDERERS_PER_WORKER: NonZeroUsize = NonZeroUsize::new(8).expect("8 != 0");
 
+/// PROTOTYPE: which tile workers hold a renderer for each affinity key (bit i = worker i).
+static HOLDERS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<u64, u64>>> =
+    std::sync::LazyLock::new(Default::default);
+thread_local! {
+    /// Index of the pool worker running on this thread.
+    static WORKER_INDEX: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn holders_mask(key: u64) -> u64 {
+    HOLDERS.lock().map(|h| h.get(&key).copied().unwrap_or(0)).unwrap_or(0)
+}
+
+fn holders_set(key: u64, held: bool) {
+    let bit = 1_u64 << WORKER_INDEX.with(std::cell::Cell::get).min(63);
+    if let Ok(mut h) = HOLDERS.lock() {
+        let m = h.entry(key).or_insert(0);
+        if held { *m |= bit } else { *m &= !bit }
+    }
+}
+
+/// The affinity key of a style and geometry.
+fn affinity_key(style: &RenderStyle, geometry: Geometry) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    match style {
+        RenderStyle::Path(p) => p.hash(&mut h),
+        RenderStyle::Json(j) => j.hash(&mut h),
+    }
+    format!("{geometry:?}").hash(&mut h);
+    h.finish()
+}
+
+fn ttl() -> Option<std::time::Duration> {
+    static TTL: std::sync::OnceLock<Option<std::time::Duration>> = std::sync::OnceLock::new();
+    *TTL.get_or_init(|| std::env::var("MARTIN_X_TTL_S").ok().and_then(|v| v.parse().ok()).map(std::time::Duration::from_secs))
+}
+
 /// A tile renderer for one geometry with a style loaded.
 struct TileSlot {
     style: RenderStyle,
     geometry: Geometry,
     renderer: Renderer,
+    key: u64,
+    last_used: std::time::Instant,
 }
 
 /// Worker that renders slippy tiles via tile-mode maps.
@@ -515,6 +567,8 @@ struct TileSlot {
 /// so mixed traffic does not reload a style on every request.
 struct TileWorker {
     device: WorkerDevice,
+    x_hits: u64,
+    x_misses: u64,
     capacity: NonZeroUsize,
     slots: Vec<TileSlot>,
 }
@@ -525,6 +579,8 @@ impl TileWorker {
             device: WorkerDevice::new(runtime),
             capacity,
             slots: Vec::new(),
+            x_hits: 0,
+            x_misses: 0,
         }
     }
 
@@ -538,21 +594,65 @@ impl TileWorker {
             // Move the hit to the front, keeping the others in most-recently-used order,
             // so the `truncate` below always drops the least recently used renderer.
             self.slots[..=i].rotate_right(1);
+            self.slots[0].last_used = std::time::Instant::now();
+            self.x_hits += 1;
+            if self.x_hits % 1000 == 0 { x_rstat("hit", self.x_hits, self.x_misses, style, geometry); }
         } else {
+            self.x_misses += 1;
+            x_rstat("miss", self.x_hits, self.x_misses, style, geometry);
             let mut renderer = geometry.renderer(&mut self.device)?;
             style.load(&mut renderer)?;
-            self.slots.truncate(self.capacity.get() - 1);
+            while self.slots.len() >= self.capacity.get() {
+                if let Some(old) = self.slots.pop() {
+                    holders_set(old.key, false);
+                }
+            }
+            let key = affinity_key(style, geometry);
+            holders_set(key, true);
             self.slots.insert(
                 0,
                 TileSlot {
                     style: style.clone(),
                     geometry,
                     renderer,
+                    key,
+                    last_used: std::time::Instant::now(),
                 },
             );
         }
         Ok(&mut self.slots[0])
     }
+
+    /// Drops the renderers unused for longer than MARTIN_X_TTL_S.
+    fn expire(&mut self) {
+        let Some(ttl) = ttl() else { return };
+        let before = self.slots.len();
+        self.slots.retain(|s| {
+            let keep = s.last_used.elapsed() < ttl;
+            if !keep {
+                holders_set(s.key, false);
+            }
+            keep
+        });
+        if self.slots.len() != before {
+            x_rstat_evict(before - self.slots.len(), self.slots.len());
+        }
+    }
+}
+
+fn x_rstat_evict(dropped: usize, left: usize) {
+    if std::env::var_os("MARTIN_X_RSTAT").is_none() { return; }
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    eprintln!("X-RSTAT-EVICT {t} {:?} dropped={dropped} left={left}", thread::current().id());
+}
+
+/// MEASUREMENT ONLY: renderer LRU counters on stderr when MARTIN_X_RSTAT is set.
+fn x_rstat(kind: &str, hits: u64, misses: u64, style: &RenderStyle, geometry: Geometry) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("MARTIN_X_RSTAT").is_some()) { return; }
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    let s = match style { RenderStyle::Path(p) => p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(), RenderStyle::Json(_) => "json".into() };
+    eprintln!("X-RSTAT {t} {:?} {kind} hits={hits} misses={misses} {s} {geometry:?}", thread::current().id());
 }
 
 impl Worker for TileWorker {
@@ -560,17 +660,15 @@ impl Worker for TileWorker {
     type Request = TileRequest;
 
     fn affinity(req: &TileRequest) -> Option<u64> {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        match &req.style {
-            RenderStyle::Path(p) => p.hash(&mut h),
-            RenderStyle::Json(j) => j.hash(&mut h),
-        }
-        format!("{:?}", Geometry::of(req)).hash(&mut h);
-        Some(h.finish())
+        Some(affinity_key(&req.style, Geometry::of(req)))
+    }
+
+    fn tick(&mut self) {
+        self.expire();
     }
 
     fn render(&mut self, req: TileRequest) -> Result<Image, StyleError> {
+        self.expire();
         let geometry = Geometry::of(&req);
         self.slot(&req.style, geometry)?
             .renderer

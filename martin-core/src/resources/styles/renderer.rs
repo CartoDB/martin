@@ -234,6 +234,7 @@ impl Renderer {
         let options = MapOptions {
             map_mode: mode,
             event_mask: Some(RuntimeEventFlag::MAP_STYLE_LOADED | RuntimeEventFlag::MAP_LOADING_FAILED),
+            tile_cache_size: std::env::var("MARTIN_TILE_CACHE_SIZE").ok().and_then(|v| v.parse().ok()),
             ..MapOptions::new(extent)
         };
         let (map, created) = runtime.handle.create_map(&options)?;
