@@ -5,18 +5,18 @@ use std::future::Future;
 use std::ops::Deref;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, Once, PoisonError};
 use std::task::{Context, Poll, Wake, Waker};
 
 use image::RgbaImage;
 use maplibre_native_ffi::{
     CameraOptions, CameraUpdate, CameraUpdateMode, CommandCompletion, GraphicsDeviceHandle,
-    GraphicsDeviceTextureDescriptor, LogicalExtent, MapHandle, MapMode, MapOptions, NativeFuture, RenderDriverKind,
-    RenderSessionAttachOptions, RenderSessionHandle, RuntimeEvent, RuntimeEventFlag, RuntimeEventHandler,
-    RuntimeEventType, RuntimeHandle, RuntimeOptions, TextureReadbackResult,
+    GraphicsDeviceTextureDescriptor, LogEvent, LogHandler, LogSeverity, LogicalExtent, MapHandle, MapMode, MapOptions,
+    NativeFuture, RenderDriverKind, RenderSessionAttachOptions, RenderSessionHandle, RuntimeEvent, RuntimeEventFlag,
+    RuntimeEventHandler, RuntimeEventType, RuntimeHandle, RuntimeOptions, TextureReadbackResult,
 };
 
-use tracing::warn;
+use tracing::{error, info, warn};
 
 use crate::resources::styles::StyleError;
 
@@ -58,6 +58,7 @@ impl Runtime {
     ///
     /// Returns [`StyleError::GraphicsUnavailable`] when no graphics device can be created.
     pub fn new(ambient_cache_bytes: Option<u64>) -> Result<Self, StyleError> {
+        forward_logs();
         let device = GraphicsDeviceHandle::create(None).map_err(|err| StyleError::GraphicsUnavailable {
             reason: err.to_string(),
         })?;
@@ -83,6 +84,33 @@ impl Runtime {
             device,
             listeners,
         })
+    }
+}
+
+/// The `tracing` target of `MapLibre`'s own log records.
+const LOG_TARGET: &str = "martin_core::styles::maplibre";
+
+/// Sends `MapLibre`'s log records to `tracing` under [`LOG_TARGET`] instead of stderr, once per process.
+fn forward_logs() {
+    static FORWARD: Once = Once::new();
+    FORWARD.call_once(|| {
+        // Runs on whichever thread logs, a MapLibre background thread for info and warnings.
+        let handler = LogHandler::new(|severity, event, code, message| {
+            log(severity, event, code, message);
+            true
+        });
+        if let Err(err) = maplibre_native_ffi::set_log_callback(handler) {
+            warn!(error = %err, "Failed to forward MapLibre's logs, they go to stderr");
+        }
+    });
+}
+
+/// Emits one `MapLibre` log record at the matching `tracing` level.
+fn log(severity: LogSeverity, event: LogEvent, code: i64, message: &str) {
+    match severity {
+        LogSeverity::Info => info!(target: LOG_TARGET, ?event, code, "{message}"),
+        LogSeverity::Error => error!(target: LOG_TARGET, ?event, code, "{message}"),
+        LogSeverity::Warning | LogSeverity::Unknown(_) => warn!(target: LOG_TARGET, ?event, code, "{message}"),
     }
 }
 

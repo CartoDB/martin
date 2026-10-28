@@ -174,6 +174,16 @@ docker run --read-only --tmpfs /tmp ... ghcr.io/maplibre/martin:2.0.0-beta.4
 
 Martin leaves `MESA_SHADER_CACHE_DIR` and `MESA_SHADER_CACHE_DISABLE` alone when they are set.
 
+### MapLibre Native logs
+
+MapLibre Native's own log records go to Martin's [log](../troubleshooting.md#logging) under the `martin_core::styles::maplibre` target, at the level MapLibre Native gives them.
+For tile renders it warns whenever a tile's camera covers more than one tile of a source (`Provided camera options returned 2 tiles, ...`), which is harmless.
+To keep only its errors:
+
+```bash
+export RUST_LOG=martin=info,martin_core=info,martin_core::styles::maplibre=error
+```
+
 ## Static images
 
 !!! info
