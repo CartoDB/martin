@@ -150,8 +150,8 @@ lasso = { version = "0.7.3", features = ["multi-threaded"] }
 log = "0.4"
 map-tile-toolkit = { path = "./map-tile-toolkit", version = "0.3.4" }
 # `GraphicsDeviceOptions::single_context` is not in maplibre/maplibre-native-ffi yet: CartoDB's branch
-# carto/graphics-device-pooled, on maplibre-native-ffi 79e7fc27. Back to upstream once it ships there.
-maplibre-native-ffi = { git = "https://github.com/CartoDB/maplibre-native-ffi", rev = "7aaacc74016275fb35c7a217e30c764309fac398" }
+# carto/graphics-device-pooled-2, on maplibre-native-ffi 05e98eda. Back to upstream once it ships there.
+maplibre-native-ffi = { git = "https://github.com/CartoDB/maplibre-native-ffi", rev = "5c2f836f3cbd263fc3f857ebb79f899362844900" }
 martin-config-macros = { path = "./martin-config-macros", version = "0.1.4" }
 martin-core = { path = "./martin-core", version = "0.14.0", default-features = false }
 martin-tile-utils = { path = "./martin-tile-utils", version = "0.9.1" }
