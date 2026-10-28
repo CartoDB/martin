@@ -879,7 +879,8 @@ mod tests {
         assert_eq!(WORKERS_BUILT.load(Ordering::SeqCst), before + 1);
     }
 
-    /// A style whose only label needs a glyph range that is not in `glyphs`, so every render of it fails.
+    /// A style whose only label needs one glyph range, which is not in `glyphs`, so every render of it fails.
+    /// One range, so one error per map: a second error could otherwise end the next render on that map.
     fn missing_glyphs_style(glyphs: &std::path::Path) -> RenderStyle {
         let glyphs = format!("file://{}/{{fontstack}}/{{range}}.pbf", glyphs.display());
         let style = serde_json::json!({
@@ -887,7 +888,7 @@ mod tests {
             "glyphs": glyphs,
             "sources": {"label": {"type": "geojson", "data": {
                 "type": "Feature",
-                "properties": {"name": "東京"},
+                "properties": {"name": "東"},
                 "geometry": {"type": "Point", "coordinates": [0, 0]}
             }}},
             "layers": [
@@ -905,7 +906,7 @@ mod tests {
             return result;
         }
         // Dropping the last pool handle joins the stuck worker.
-        std::mem::forget(pool.clone());
+        let _never_dropped = std::mem::ManuallyDrop::new(pool.clone());
         panic!("render did not finish");
     }
 
