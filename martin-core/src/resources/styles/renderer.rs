@@ -93,7 +93,7 @@ impl Runtime {
 /// Creates a graphics device whose texture sessions, with `single_context`, take turns in one graphics context.
 fn create_device(single_context: bool) -> Result<GraphicsDeviceHandle, StyleError> {
     let options = GraphicsDeviceOptions {
-        single_context,
+        single_context: Some(single_context),
         ..GraphicsDeviceOptions::default()
     };
     GraphicsDeviceHandle::create(Some(&options)).map_err(|err| StyleError::GraphicsUnavailable {
