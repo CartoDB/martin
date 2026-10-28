@@ -3,6 +3,7 @@ use std::num::{NonZeroU8, NonZeroUsize};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::thread::{self, JoinHandle};
 
 use image::RgbaImage as Image;
@@ -244,6 +245,10 @@ impl<W: Worker> std::fmt::Debug for RenderPool<W> {
 
 struct Inner<R> {
     requests: flume::Sender<Msg<R>>,
+    /// Per-worker queues and their queued + running counts (affinity dispatch).
+    own: Vec<flume::Sender<Msg<R>>>,
+    load: Arc<Vec<AtomicUsize>>,
+    affinity_k: Option<usize>,
     workers: Vec<JoinHandle<()>>,
 }
 
@@ -281,13 +286,22 @@ impl<W: Worker> RenderPool<W> {
         let workers = workers.unwrap_or_else(default_worker_count);
         let (requests, rx) = flume::bounded::<Msg<W::Request>>(workers.get() * WORKER_QUEUE_DEPTH);
         let mut handles = Vec::with_capacity(workers.get());
+        let affinity_k = std::env::var("MARTIN_X_AFFINITY").ok().and_then(|v| v.parse().ok());
+        let load: Arc<Vec<AtomicUsize>> = Arc::new((0..workers.get()).map(|_| AtomicUsize::new(0)).collect());
+        let mut own = Vec::with_capacity(workers.get());
         for i in 0..workers.get() {
             let rx = rx.clone();
+            let (own_tx, own_rx) = flume::bounded::<Msg<W::Request>>(WORKER_QUEUE_DEPTH);
+            own.push(own_tx);
+            let load = Arc::clone(&load);
             let new_worker = new_worker.clone();
             let handle = thread::Builder::new()
                 .name(format!("render-{}-{i}", W::NAME))
-                .spawn(move || worker_loop(&rx, &new_worker))?;
+                .spawn(move || worker_loop(&rx, &own_rx, &load, i, &new_worker))?;
             handles.push(handle);
+        }
+        if affinity_k.is_some() {
+            info!(k = ?affinity_k, kind = W::NAME, "Affinity dispatch (MARTIN_X_AFFINITY)");
         }
 
         info!(workers = workers.get(), kind = W::NAME, "Started style render pool");
@@ -295,6 +309,9 @@ impl<W: Worker> RenderPool<W> {
         Ok(Self {
             inner: Arc::new(Inner {
                 requests,
+                own,
+                load,
+                affinity_k,
                 workers: handles,
             }),
         })
@@ -302,14 +319,40 @@ impl<W: Worker> RenderPool<W> {
 
     /// Dispatch a request to a worker and await its rendered image.
     async fn render(&self, request: W::Request) -> Result<Image, StyleError> {
+        let key = self.inner.affinity_k.and_then(|_| W::affinity(&request));
         let (response_tx, response_rx) = oneshot::channel();
+        let msg = Msg::Render(request, response_tx);
 
-        // Bounded channel: async send awaits when full instead of blocking the runtime.
-        self.inner
-            .requests
-            .send_async(Msg::Render(request, response_tx))
-            .await
-            .map_err(|_err| StyleError::FailedToSendRequest)?;
+        if let (Some(k), Some(key)) = (self.inner.affinity_k, key) {
+            let load = &self.inner.load;
+            let n = load.len();
+            let home = usize::try_from(key % n as u64).unwrap_or(0);
+            let second = (home + 1) % n;
+            // Stay on the key's worker unless its queue is more than k longer than the shortest one.
+            let least = (0..n)
+                .min_by_key(|&w| (load[w].load(Relaxed), usize::from(w != home)))
+                .unwrap_or(home);
+            let floor = load[least].load(Relaxed) + k;
+            let pick = if load[home].load(Relaxed) <= floor {
+                home
+            } else if load[second].load(Relaxed) <= floor {
+                second
+            } else {
+                least
+            };
+            load[pick].fetch_add(1, Relaxed);
+            if self.inner.own[pick].send_async(msg).await.is_err() {
+                load[pick].fetch_sub(1, Relaxed);
+                return Err(StyleError::FailedToSendRequest);
+            }
+        } else {
+            // Bounded channel: async send awaits when full instead of blocking the runtime.
+            self.inner
+                .requests
+                .send_async(msg)
+                .await
+                .map_err(|_err| StyleError::FailedToSendRequest)?;
+        }
 
         response_rx.await.map_err(|_err| StyleError::FailedToReceiveResponse)?
     }
@@ -321,9 +364,26 @@ fn default_worker_count() -> NonZeroUsize {
     thread::available_parallelism().unwrap_or(MIN).clamp(MIN, MAX)
 }
 
-fn worker_loop<W: Worker>(rx: &flume::Receiver<Msg<W::Request>>, new_worker: &dyn Fn() -> W) {
+fn worker_loop<W: Worker>(
+    rx: &flume::Receiver<Msg<W::Request>>,
+    own: &flume::Receiver<Msg<W::Request>>,
+    load: &[AtomicUsize],
+    index: usize,
+    new_worker: &dyn Fn() -> W,
+) {
     let mut worker = new_worker();
-    while let Ok(msg) = rx.recv() {
+    loop {
+        let (msg, mine) = match own.try_recv() {
+            Ok(msg) => (msg, true),
+            Err(_) => match flume::Selector::new()
+                .recv(own, |m| (m, true))
+                .recv(rx, |m| (m, false))
+                .wait()
+            {
+                (Ok(msg), mine) => (msg, mine),
+                (Err(_), _) => break,
+            },
+        };
         match msg {
             Msg::Render(request, response) => {
                 // A panic would take the worker with it and the pool never spawns another.
@@ -346,6 +406,9 @@ fn worker_loop<W: Worker>(rx: &flume::Receiver<Msg<W::Request>>, new_worker: &dy
                     }
                 };
                 let _ = response.send(result);
+                if mine {
+                    load[index].fetch_sub(1, Relaxed);
+                }
             }
             Msg::Shutdown => break,
         }
@@ -365,6 +428,11 @@ trait Worker: 'static {
 
     /// Render one request to an image.
     fn render(&mut self, request: Self::Request) -> Result<Image, StyleError>;
+
+    /// The key whose requests should go to the same worker, if any.
+    fn affinity(_request: &Self::Request) -> Option<u64> {
+        None
+    }
 }
 
 /// A slippy-tile render request.
@@ -490,6 +558,17 @@ impl TileWorker {
 impl Worker for TileWorker {
     const NAME: &'static str = "tile";
     type Request = TileRequest;
+
+    fn affinity(req: &TileRequest) -> Option<u64> {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        match &req.style {
+            RenderStyle::Path(p) => p.hash(&mut h),
+            RenderStyle::Json(j) => j.hash(&mut h),
+        }
+        format!("{:?}", Geometry::of(req)).hash(&mut h);
+        Some(h.finish())
+    }
 
     fn render(&mut self, req: TileRequest) -> Result<Image, StyleError> {
         let geometry = Geometry::of(&req);
