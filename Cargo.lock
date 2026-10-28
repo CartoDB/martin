@@ -5721,7 +5721,7 @@ dependencies = [
 [[package]]
 name = "maplibre-native-ffi"
 version = "0.0.0"
-source = "git+https://github.com/maplibre/maplibre-native-ffi?rev=43162e8b588163a8c2119b77f8ee07b3f69f5bba#43162e8b588163a8c2119b77f8ee07b3f69f5bba"
+source = "git+https://github.com/CartoDB/maplibre-native-ffi?rev=7aaacc74016275fb35c7a217e30c764309fac398#7aaacc74016275fb35c7a217e30c764309fac398"
 dependencies = [
  "bitflags 2.13.2",
  "maplibre-native-ffi-sys",
@@ -5730,7 +5730,7 @@ dependencies = [
 [[package]]
 name = "maplibre-native-ffi-platform"
 version = "0.0.0"
-source = "git+https://github.com/maplibre/maplibre-native-ffi?rev=43162e8b588163a8c2119b77f8ee07b3f69f5bba#43162e8b588163a8c2119b77f8ee07b3f69f5bba"
+source = "git+https://github.com/CartoDB/maplibre-native-ffi?rev=7aaacc74016275fb35c7a217e30c764309fac398#7aaacc74016275fb35c7a217e30c764309fac398"
 dependencies = [
  "fixed_decimal",
  "http 1.5.0",
@@ -5749,7 +5749,7 @@ dependencies = [
 [[package]]
 name = "maplibre-native-ffi-sys"
 version = "0.0.0"
-source = "git+https://github.com/maplibre/maplibre-native-ffi?rev=43162e8b588163a8c2119b77f8ee07b3f69f5bba#43162e8b588163a8c2119b77f8ee07b3f69f5bba"
+source = "git+https://github.com/CartoDB/maplibre-native-ffi?rev=7aaacc74016275fb35c7a217e30c764309fac398#7aaacc74016275fb35c7a217e30c764309fac398"
 dependencies = [
  "flate2",
  "maplibre-native-ffi-platform",
