@@ -149,9 +149,9 @@ lambda-web = { version = "0.2.1", features = ["actix4"] }
 lasso = { version = "0.7.3", features = ["multi-threaded"] }
 log = "0.4"
 map-tile-toolkit = { path = "./map-tile-toolkit", version = "0.3.4" }
-# `GraphicsDeviceOptions::single_context` is not in maplibre/maplibre-native-ffi yet: CartoDB's branch
-# carto/graphics-device-pooled-2, on maplibre-native-ffi 05e98eda. Back to upstream once it ships there.
-maplibre-native-ffi = { git = "https://github.com/CartoDB/maplibre-native-ffi", rev = "ae48d5c0235727da0142e046600e26a9616d9db5" }
+# `MapOptions::tile_cache_size` is not in maplibre/maplibre-native-ffi yet: CartoDB's branch
+# carto/tile-cache-size, on maplibre-native-ffi ae2314bf. Back to a release once it ships there.
+maplibre-native-ffi = { git = "https://github.com/CartoDB/maplibre-native-ffi", rev = "b55fd4652052b3017d5714d9101495fbf9af79f0" }
 martin-config-macros = { path = "./martin-config-macros", version = "0.1.4" }
 martin-core = { path = "./martin-core", version = "0.14.0", default-features = false }
 martin-tile-utils = { path = "./martin-tile-utils", version = "0.9.1" }
