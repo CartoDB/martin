@@ -381,10 +381,10 @@ fn default_worker_count() -> NonZeroUsize {
 ///
 /// Each style and geometry (the affinity key) has a set of workers, at first the least loaded one.
 /// A request goes to the least loaded worker of its set. When even that one has at least `min_queue`
-/// requests and `1 + epsilon` times those of the least loaded worker outside the set (counting the
-/// request), that worker joins the set. A set without `min_queue` requests on its least loaded worker
-/// for `shrink_after` loses its most loaded worker, which drops its renderer for the key with
-/// `release_on_shrink`.
+/// requests and `1 + epsilon` times the mean of the workers outside the set (plus one), the least
+/// loaded of those joins the set, at most one every 250 ms. A set without that load (or, with every
+/// worker, without `min_queue`) for `shrink_after` loses its most loaded worker, which drops its
+/// renderer for the key with `release_on_shrink`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AffinityOptions {
     pub epsilon: f64,
@@ -392,6 +392,9 @@ pub struct AffinityOptions {
     pub shrink_after: Duration,
     pub release_on_shrink: bool,
 }
+
+/// Shortest time between two workers joining one set.
+const GROW_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug)]
 struct Affinity {
@@ -455,12 +458,18 @@ impl Affinity {
                 });
                 let mut worker = least(set.workers, true, key).unwrap_or(0);
                 let load = loads[worker];
-                if load >= self.options.min_queue {
+                let outside: Vec<usize> = (0..n).filter(|&w| set.workers >> w & 1 == 0).map(|w| loads[w]).collect();
+                // Against the workers that could join, not all of them: the mean of all includes the set's own queues.
+                let over = load >= self.options.min_queue
+                    && (outside.is_empty()
+                        || load as f64
+                            >= (1.0 + self.options.epsilon) * (outside.iter().sum::<usize>() as f64 / outside.len() as f64 + 1.0));
+                if over {
                     set.hot = now;
-                    // Compared with the worker that would join, not with the mean: the mean includes the set's own queues.
-                    let next = least(set.workers, false, key)
-                        .filter(|&w| load as f64 >= (1.0 + self.options.epsilon) * (loads[w] + 1) as f64);
-                    if let Some(next) = next {
+                    // One worker at a time, so one client's batch does not spread the key by itself.
+                    if now.duration_since(set.changed) >= GROW_INTERVAL
+                        && let Some(next) = least(set.workers, false, key).filter(|&w| loads[w] < load)
+                    {
                         set.workers |= 1 << next;
                         set.changed = now;
                         worker = next;

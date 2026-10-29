@@ -42,7 +42,7 @@ pub struct InnerStyleConfig {
 #[cfg_attr(feature = "unstable-schemas", derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct AffinityConfig {
-    /// A style's set gains a worker when its least loaded one has this percent more requests than the least loaded worker outside it. \[default: 50\]
+    /// A style's set gains a worker when its least loaded one has this percent more requests than the mean of the workers outside it (plus one). \[default: 50\]
     pub epsilon_percent: u32,
     /// ... and at least this many requests queued or rendering. \[default: 4\]
     pub min_queue: usize,
