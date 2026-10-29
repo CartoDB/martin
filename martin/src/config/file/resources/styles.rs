@@ -36,6 +36,39 @@ pub struct InnerStyleConfig {
     pub unrecognized: UnrecognizedValues,
 }
 
+/// Locality-aware dispatch of tile renders (see `rendering.affinity`).
+#[cfg(feature = "rendering")]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, CollectUnrecognizedKeys, ConfigurationLivecycleHooks)]
+#[cfg_attr(feature = "unstable-schemas", derive(schemars::JsonSchema))]
+#[serde(default)]
+pub struct AffinityConfig {
+    /// A style's set gains a worker when its least loaded one has this percent more requests than the mean. \[default: 50\]
+    pub epsilon_percent: u32,
+    /// ... and at least this many requests queued or rendering. \[default: 4\]
+    pub min_queue: usize,
+    /// A set loses a worker after this many seconds without that load. \[default: 30\]
+    pub shrink_after_secs: u64,
+    /// The worker leaving a set drops its renderer for that style. \[default: true\]
+    pub release_on_shrink: bool,
+
+    #[serde(flatten, skip_serializing)]
+    #[cfg_attr(feature = "unstable-schemas", schemars(skip))]
+    pub unrecognized: UnrecognizedValues,
+}
+
+#[cfg(feature = "rendering")]
+impl Default for AffinityConfig {
+    fn default() -> Self {
+        Self {
+            epsilon_percent: 50,
+            min_queue: 4,
+            shrink_after_secs: 30,
+            release_on_shrink: true,
+            unrecognized: UnrecognizedValues::default(),
+        }
+    }
+}
+
 #[cfg(feature = "rendering")]
 #[derive(
     Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, CollectUnrecognizedKeys, ConfigurationLivecycleHooks,
@@ -72,6 +105,11 @@ pub struct RendererConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "unstable-schemas", schemars(example = &true))]
     pub context_per_worker: Option<bool>,
+
+    /// Send each style and pixel ratio to its own set of workers, which grows under load and shrinks
+    /// when idle, so each worker loads fewer renderers. `true` uses the defaults. \[default: false\]
+    #[serde(default, skip_serializing_if = "OptBoolObj::is_none")]
+    pub affinity: OptBoolObj<AffinityConfig>,
 
     /// Whole-number `@{n}x` pixel ratios served, each 1 to 4. Others are answered with `400 Bad Request`.
     /// \[default: \[1, 2\]\]
@@ -192,6 +230,20 @@ impl RendererConfig {
 
     /// Palette size for rendered PNGs, or `None` to keep RGBA.
     #[must_use]
+    pub fn affinity(&self) -> Option<martin_core::styles::AffinityOptions> {
+        let c = match &self.affinity {
+            OptBoolObj::NoValue | OptBoolObj::Bool(false) => return None,
+            OptBoolObj::Bool(true) => AffinityConfig::default(),
+            OptBoolObj::Object(c) => c.clone(),
+        };
+        Some(martin_core::styles::AffinityOptions {
+            epsilon: f64::from(c.epsilon_percent) / 100.0,
+            min_queue: c.min_queue,
+            shrink_after: std::time::Duration::from_secs(c.shrink_after_secs),
+            release_on_shrink: c.release_on_shrink,
+        })
+    }
+
     pub fn png_max_colors(&self) -> Option<u16> {
         match &self.png_palette {
             OptBoolObj::NoValue | OptBoolObj::Bool(true) => Some(PngPaletteSize::default().get()),
@@ -223,7 +275,7 @@ impl StyleConfig {
             OptBoolObj::Object(ref o) if !o.enabled => results.disable_rendering(),
             OptBoolObj::Bool(true) => {
                 results
-                    .enable_rendering(None, TileSize::default(), DEFAULT_RENDERERS_PER_WORKER, None, false)
+                    .enable_rendering(None, TileSize::default(), DEFAULT_RENDERERS_PER_WORKER, None, false, None)
                     .map_err(ConfigFileError::RendererPoolSpawnFailed)?;
                 results.set_png_max_colors(RendererConfig::default().png_max_colors());
             }
@@ -235,6 +287,7 @@ impl StyleConfig {
                         o.renderers_per_worker.unwrap_or(DEFAULT_RENDERERS_PER_WORKER),
                         o.ambient_cache_bytes(),
                         o.context_per_worker.unwrap_or_default(),
+                        o.affinity(),
                     )
                     .map_err(ConfigFileError::RendererPoolSpawnFailed)?;
                 results.set_pixel_ratios(o.pixel_ratios.unwrap_or_default());
