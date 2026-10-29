@@ -2,20 +2,24 @@ use std::f64::consts::PI;
 use std::num::{NonZeroU8, NonZeroUsize};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::hash::BuildHasher;
+use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use image::RgbaImage as Image;
 use maplibre_native_ffi::{CameraOptions, LatLng, MapMode};
 use tokio::sync::oneshot;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::overlay::{AppliedOverlay, OverlaySpec, apply_to_style};
 use crate::resources::styles::renderer::{Renderer, Runtime, WorkerDevice};
 use crate::resources::styles::{StyleError, TileSize};
 
 /// A style to render: a file, or a style document already in memory.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RenderStyle {
     /// A style JSON file.
     Path(PathBuf),
@@ -148,6 +152,8 @@ impl RenderPools {
     ///
     /// With `context_per_worker`, the renderers of each worker share one graphics context (see [`WorkerDevice`]).
     ///
+    /// With `affinity`, each style and geometry goes to its own set of tile workers (see [`AffinityOptions`]).
+    ///
     /// # Errors
     ///
     /// Returns [`StyleError::GraphicsUnavailable`] if no graphics device can be created,
@@ -159,11 +165,12 @@ impl RenderPools {
         renderers_per_worker: NonZeroUsize,
         ambient_cache_bytes: Option<u64>,
         context_per_worker: bool,
+        affinity: Option<AffinityOptions>,
     ) -> Result<Self, StyleError> {
         let runtime = Arc::new(Runtime::new(ambient_cache_bytes, context_per_worker)?);
         let tile_runtime = Arc::clone(&runtime);
         Ok(Self {
-            tile: RenderPool::new(workers, move || {
+            tile: RenderPool::with_affinity(workers, affinity, move || {
                 TileWorker::new(Arc::clone(&tile_runtime), renderers_per_worker)
             })?,
             tile_size,
@@ -243,14 +250,31 @@ impl<W: Worker> std::fmt::Debug for RenderPool<W> {
 }
 
 struct Inner<R> {
-    requests: flume::Sender<Msg<R>>,
+    queues: Queues<R>,
     workers: Vec<JoinHandle<()>>,
+}
+
+/// How requests reach the workers.
+enum Queues<R> {
+    /// One queue that every worker takes from.
+    Shared(flume::Sender<Msg<R>>),
+    /// One queue per worker, chosen by [`Affinity`].
+    PerWorker(Vec<flume::Sender<Msg<R>>>, Affinity),
 }
 
 impl<R> Drop for Inner<R> {
     fn drop(&mut self) {
-        for _ in 0..self.workers.len() {
-            let _ = self.requests.send(Msg::Shutdown);
+        match &self.queues {
+            Queues::Shared(tx) => {
+                for _ in 0..self.workers.len() {
+                    let _ = tx.send(Msg::Shutdown);
+                }
+            }
+            Queues::PerWorker(txs, _) => {
+                for tx in txs {
+                    let _ = tx.send(Msg::Shutdown);
+                }
+            }
         }
         for handle in self.workers.drain(..) {
             let _ = handle.join();
@@ -260,6 +284,8 @@ impl<R> Drop for Inner<R> {
 
 enum Msg<R> {
     Render(R, oneshot::Sender<Result<Image, StyleError>>),
+    /// Drop the renderer of this affinity key: the worker left the key's set.
+    Release(u64),
     Shutdown,
 }
 
@@ -278,23 +304,44 @@ impl<W: Worker> RenderPool<W> {
     where
         F: Fn() -> W + Clone + Send + 'static,
     {
+        Self::with_affinity(workers, None, new_worker)
+    }
+
+    /// Like [`Self::new`], with one queue per worker chosen by `affinity` if given.
+    fn with_affinity<F>(
+        workers: Option<NonZeroUsize>,
+        affinity: Option<AffinityOptions>,
+        new_worker: F,
+    ) -> Result<Self, std::io::Error>
+    where
+        F: Fn() -> W + Clone + Send + 'static,
+    {
         let workers = workers.unwrap_or_else(default_worker_count);
-        let (requests, rx) = flume::bounded::<Msg<W::Request>>(workers.get() * WORKER_QUEUE_DEPTH);
-        let mut handles = Vec::with_capacity(workers.get());
-        for i in 0..workers.get() {
-            let rx = rx.clone();
+        let n = workers.get();
+        let (queues, receivers, load) = if let Some(options) = affinity {
+            let (txs, rxs): (Vec<_>, Vec<_>) = (0..n).map(|_| flume::bounded(WORKER_QUEUE_DEPTH)).unzip();
+            let affinity = Affinity::new(n, options);
+            let load = Arc::clone(&affinity.load);
+            (Queues::PerWorker(txs, affinity), rxs, Some(load))
+        } else {
+            let (tx, rx) = flume::bounded(n * WORKER_QUEUE_DEPTH);
+            (Queues::Shared(tx), vec![rx; n], None)
+        };
+        let mut handles = Vec::with_capacity(n);
+        for (i, rx) in receivers.into_iter().enumerate() {
             let new_worker = new_worker.clone();
+            let load = load.clone().map(|load| (load, i));
             let handle = thread::Builder::new()
                 .name(format!("render-{}-{i}", W::NAME))
-                .spawn(move || worker_loop(&rx, &new_worker))?;
+                .spawn(move || worker_loop(&rx, load.as_ref(), &new_worker))?;
             handles.push(handle);
         }
 
-        info!(workers = workers.get(), kind = W::NAME, "Started style render pool");
+        info!(workers = n, kind = W::NAME, affinity = ?affinity, "Started style render pool");
 
         Ok(Self {
             inner: Arc::new(Inner {
-                requests,
+                queues,
                 workers: handles,
             }),
         })
@@ -304,12 +351,20 @@ impl<W: Worker> RenderPool<W> {
     async fn render(&self, request: W::Request) -> Result<Image, StyleError> {
         let (response_tx, response_rx) = oneshot::channel();
 
-        // Bounded channel: async send awaits when full instead of blocking the runtime.
-        self.inner
-            .requests
-            .send_async(Msg::Render(request, response_tx))
-            .await
-            .map_err(|_err| StyleError::FailedToSendRequest)?;
+        // Bounded channels: async send awaits when full instead of blocking the runtime.
+        match &self.inner.queues {
+            Queues::Shared(tx) => tx
+                .send_async(Msg::Render(request, response_tx))
+                .await
+                .map_err(|_err| StyleError::FailedToSendRequest)?,
+            Queues::PerWorker(txs, affinity) => {
+                let worker = affinity.pick(W::affinity(&request), txs);
+                if txs[worker].send_async(Msg::Render(request, response_tx)).await.is_err() {
+                    affinity.done(worker);
+                    return Err(StyleError::FailedToSendRequest);
+                }
+            }
+        }
 
         response_rx.await.map_err(|_err| StyleError::FailedToReceiveResponse)?
     }
@@ -321,7 +376,189 @@ fn default_worker_count() -> NonZeroUsize {
     thread::available_parallelism().unwrap_or(MIN).clamp(MIN, MAX)
 }
 
-fn worker_loop<W: Worker>(rx: &flume::Receiver<Msg<W::Request>>, new_worker: &dyn Fn() -> W) {
+/// Dispatch of tile requests by locality (LARD with replication, Pai et al. 1998, with the
+/// bounded loads of Mirrokni et al. 2018).
+///
+/// Each style and geometry (the affinity key) has a set of workers, at first the least loaded one.
+/// A request goes to the least loaded worker of its set. When even that one has at least `min_queue`
+/// requests and `1 + epsilon` times the mean of the workers outside the set (plus one), the least
+/// loaded of those joins the set, at most one every 250 ms. A set without that load (or, with every
+/// worker, without `min_queue`) for `shrink_after` loses its most loaded worker, which drops its
+/// renderer for the key with `release_on_shrink`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AffinityOptions {
+    pub epsilon: f64,
+    pub min_queue: usize,
+    pub shrink_after: Duration,
+    pub release_on_shrink: bool,
+}
+
+/// Shortest time between two workers joining one set.
+const GROW_INTERVAL: Duration = Duration::from_millis(250);
+
+#[derive(Debug)]
+struct Affinity {
+    options: AffinityOptions,
+    /// Requests queued or rendering, per worker.
+    load: Arc<[AtomicUsize]>,
+    sets: Mutex<KeySets>,
+}
+
+#[derive(Debug)]
+struct KeySets {
+    sets: HashMap<u64, KeySet>,
+    swept: Instant,
+}
+
+#[derive(Debug)]
+struct KeySet {
+    /// Bit `i` is worker `i`.
+    workers: u64,
+    /// Last time the set was loaded enough to grow.
+    hot: Instant,
+    /// Last time it grew or shrank.
+    changed: Instant,
+}
+
+impl Affinity {
+    fn new(workers: usize, options: AffinityOptions) -> Self {
+        Self {
+            options,
+            load: (0..workers.min(64)).map(|_| AtomicUsize::new(0)).collect(),
+            sets: Mutex::new(KeySets {
+                sets: HashMap::new(),
+                swept: Instant::now(),
+            }),
+        }
+    }
+
+    /// Chooses the worker for a request of `key` (the least loaded one without a key) and counts it.
+    fn pick<R>(&self, key: Option<u64>, queues: &[flume::Sender<Msg<R>>]) -> usize {
+        let now = Instant::now();
+        let loads: Vec<usize> = self.load.iter().map(|l| l.load(Relaxed)).collect();
+        let n = loads.len();
+        let least = |workers: u64, inside: bool, key: u64| {
+            (0..n)
+                .filter(|&w| (workers >> w & 1 == 1) == inside)
+                .min_by_key(|&w| (loads[w], (w as u64).wrapping_sub(key) % n as u64))
+        };
+        let worker = match key {
+            None => least(0, false, 0).unwrap_or(0),
+            Some(key) => {
+                let mut guard = self.sets.lock().unwrap_or_else(PoisonError::into_inner);
+                let KeySets { sets, swept } = &mut *guard;
+                if now.duration_since(*swept) >= Duration::from_secs(1) {
+                    *swept = now;
+                    self.shrink(sets, now, queues);
+                }
+                let set = sets.entry(key).or_insert_with(|| KeySet {
+                    workers: 1 << least(0, false, key).unwrap_or(0),
+                    hot: now,
+                    changed: now,
+                });
+                let mut worker = least(set.workers, true, key).unwrap_or(0);
+                let load = loads[worker];
+                let outside: Vec<usize> = (0..n).filter(|&w| set.workers >> w & 1 == 0).map(|w| loads[w]).collect();
+                // Against the workers that could join, not all of them: the mean of all includes the set's own queues.
+                let over = load >= self.options.min_queue
+                    && (outside.is_empty()
+                        || load as f64
+                            >= (1.0 + self.options.epsilon) * (outside.iter().sum::<usize>() as f64 / outside.len() as f64 + 1.0));
+                if over {
+                    set.hot = now;
+                    // One worker at a time, so one client's batch does not spread the key by itself.
+                    if now.duration_since(set.changed) >= GROW_INTERVAL
+                        && let Some(next) = least(set.workers, false, key).filter(|&w| loads[w] < load)
+                    {
+                        set.workers |= 1 << next;
+                        set.changed = now;
+                        worker = next;
+                        debug!(key, workers = set.workers.count_ones(), "Render affinity set grew");
+                        #[cfg(feature = "metrics")]
+                        metrics::GROWS.inc();
+                    }
+                }
+                worker
+            }
+        };
+        self.load[worker].fetch_add(1, Relaxed);
+        #[cfg(feature = "metrics")]
+        metrics::queue(worker).set(loads[worker] as i64 + 1);
+        worker
+    }
+
+    /// Takes one worker out of each set that has not been hot for `shrink_after`.
+    fn shrink<R>(&self, sets: &mut HashMap<u64, KeySet>, now: Instant, queues: &[flume::Sender<Msg<R>>]) {
+        let after = self.options.shrink_after;
+        for (&key, set) in sets.iter_mut() {
+            if set.workers.count_ones() > 1 && now.duration_since(set.hot) >= after && now.duration_since(set.changed) >= after {
+                let busiest = (0..self.load.len())
+                    .filter(|&w| set.workers >> w & 1 == 1)
+                    .max_by_key(|&w| self.load[w].load(Relaxed))
+                    .unwrap_or(0);
+                set.workers &= !(1 << busiest);
+                set.changed = now;
+                if self.options.release_on_shrink {
+                    // Behind the requests already queued there; if the queue is full the LRU drops it later.
+                    let _ = queues[busiest].try_send(Msg::Release(key));
+                }
+                debug!(key, workers = set.workers.count_ones(), "Render affinity set shrank");
+                #[cfg(feature = "metrics")]
+                metrics::SHRINKS.inc();
+            }
+        }
+        #[cfg(feature = "metrics")]
+        {
+            metrics::KEYS.set(sets.len() as i64);
+            metrics::SET_WORKERS.set(sets.values().map(|s| i64::from(s.workers.count_ones())).sum());
+        }
+    }
+
+    /// Counts a request of `worker` as finished.
+    fn done(&self, worker: usize) {
+        let _left = self.load[worker].fetch_sub(1, Relaxed) - 1;
+        #[cfg(feature = "metrics")]
+        metrics::queue(worker).set(_left as i64);
+    }
+}
+
+#[cfg(feature = "metrics")]
+mod metrics {
+    use std::sync::LazyLock;
+
+    use prometheus::{IntCounter, IntGauge, IntGaugeVec, register_int_counter, register_int_gauge, register_int_gauge_vec};
+
+    pub static QUEUE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+        register_int_gauge_vec!("martin_render_queue", "Tile requests queued or rendering per render worker", &["worker"])
+            .expect("valid metric")
+    });
+    pub static RENDERERS: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+        register_int_gauge_vec!("martin_render_renderers", "Tile renderers loaded per render worker", &["worker"])
+            .expect("valid metric")
+    });
+    pub static KEYS: LazyLock<IntGauge> = LazyLock::new(|| {
+        register_int_gauge!("martin_render_affinity_keys", "Styles and geometries with a set of render workers").expect("valid metric")
+    });
+    pub static SET_WORKERS: LazyLock<IntGauge> = LazyLock::new(|| {
+        register_int_gauge!("martin_render_affinity_set_workers", "Sum of the sizes of the render worker sets").expect("valid metric")
+    });
+    pub static GROWS: LazyLock<IntCounter> = LazyLock::new(|| {
+        register_int_counter!("martin_render_affinity_grows_total", "Render worker sets that grew").expect("valid metric")
+    });
+    pub static SHRINKS: LazyLock<IntCounter> = LazyLock::new(|| {
+        register_int_counter!("martin_render_affinity_shrinks_total", "Render worker sets that shrank").expect("valid metric")
+    });
+
+    pub fn queue(worker: usize) -> IntGauge {
+        QUEUE.with_label_values(&[worker.to_string().as_str()])
+    }
+}
+
+fn worker_loop<W: Worker>(
+    rx: &flume::Receiver<Msg<W::Request>>,
+    load: Option<&(Arc<[AtomicUsize]>, usize)>,
+    new_worker: &dyn Fn() -> W,
+) {
     let mut worker = new_worker();
     while let Ok(msg) = rx.recv() {
         match msg {
@@ -346,7 +583,13 @@ fn worker_loop<W: Worker>(rx: &flume::Receiver<Msg<W::Request>>, new_worker: &dy
                     }
                 };
                 let _ = response.send(result);
+                if let Some((load, i)) = load {
+                    let _left = load[*i].fetch_sub(1, Relaxed) - 1;
+                    #[cfg(feature = "metrics")]
+                    metrics::queue(*i).set(_left as i64);
+                }
             }
+            Msg::Release(key) => worker.release(key),
             Msg::Shutdown => break,
         }
     }
@@ -365,6 +608,14 @@ trait Worker: 'static {
 
     /// Render one request to an image.
     fn render(&mut self, request: Self::Request) -> Result<Image, StyleError>;
+
+    /// The affinity key of a request: requests with the same key share renderers.
+    fn affinity(_request: &Self::Request) -> Option<u64> {
+        None
+    }
+
+    /// Drops what this worker keeps for an affinity key.
+    fn release(&mut self, _key: u64) {}
 }
 
 /// A slippy-tile render request.
@@ -378,7 +629,7 @@ struct TileRequest {
 }
 
 /// The output a tile renderer is built for. Each geometry needs its own renderer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Geometry {
     Tile(TileSize, NonZeroU8),
     /// `MapLibre` cannot zoom out below 0, so the 256 px world tile is the
@@ -482,14 +733,37 @@ impl TileWorker {
                     renderer,
                 },
             );
+            self.count();
         }
         Ok(&mut self.slots[0])
     }
+
+    fn count(&self) {
+        #[cfg(feature = "metrics")]
+        metrics::RENDERERS
+            .with_label_values(&[thread::current().name().and_then(|n| n.rsplit('-').next()).unwrap_or("?")])
+            .set(self.slots.len() as i64);
+    }
+}
+
+/// The affinity key of a style and geometry.
+fn affinity_key(style: &RenderStyle, geometry: Geometry) -> u64 {
+    static STATE: std::sync::LazyLock<std::hash::RandomState> = std::sync::LazyLock::new(Default::default);
+    STATE.hash_one((style, geometry))
 }
 
 impl Worker for TileWorker {
     const NAME: &'static str = "tile";
     type Request = TileRequest;
+
+    fn affinity(req: &TileRequest) -> Option<u64> {
+        Some(affinity_key(&req.style, Geometry::of(req)))
+    }
+
+    fn release(&mut self, key: u64) {
+        self.slots.retain(|s| affinity_key(&s.style, s.geometry) != key);
+        self.count();
+    }
 
     fn render(&mut self, req: TileRequest) -> Result<Image, StyleError> {
         let geometry = Geometry::of(&req);
