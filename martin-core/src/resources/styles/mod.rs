@@ -278,6 +278,7 @@ impl StyleSources {
         renderers_per_worker: NonZeroUsize,
         ambient_cache_bytes: Option<u64>,
         context_per_worker: bool,
+        tile_cache_size: Option<u32>,
     ) -> Result<(), StyleError> {
         self.pools = Some(RenderPools::new(
             workers,
@@ -285,6 +286,7 @@ impl StyleSources {
             renderers_per_worker,
             ambient_cache_bytes,
             context_per_worker,
+            tile_cache_size,
         )?);
         Ok(())
     }

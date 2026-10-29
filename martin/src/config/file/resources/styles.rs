@@ -73,6 +73,12 @@ pub struct RendererConfig {
     #[cfg_attr(feature = "unstable-schemas", schemars(example = &true))]
     pub context_per_worker: Option<bool>,
 
+    /// Tiles each renderer keeps per source after they leave the view, to draw them again without loading them.
+    /// Unset keeps `MapLibre`'s default, sized for interactive maps; 0 keeps none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "unstable-schemas", schemars(example = &2))]
+    pub tile_cache_size: Option<u32>,
+
     /// Whole-number `@{n}x` pixel ratios served, each 1 to 4. Others are answered with `400 Bad Request`.
     /// \[default: \[1, 2\]\]
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -223,7 +229,14 @@ impl StyleConfig {
             OptBoolObj::Object(ref o) if !o.enabled => results.disable_rendering(),
             OptBoolObj::Bool(true) => {
                 results
-                    .enable_rendering(None, TileSize::default(), DEFAULT_RENDERERS_PER_WORKER, None, false)
+                    .enable_rendering(
+                        None,
+                        TileSize::default(),
+                        DEFAULT_RENDERERS_PER_WORKER,
+                        None,
+                        false,
+                        None,
+                    )
                     .map_err(ConfigFileError::RendererPoolSpawnFailed)?;
                 results.set_png_max_colors(RendererConfig::default().png_max_colors());
             }
@@ -235,6 +248,7 @@ impl StyleConfig {
                         o.renderers_per_worker.unwrap_or(DEFAULT_RENDERERS_PER_WORKER),
                         o.ambient_cache_bytes(),
                         o.context_per_worker.unwrap_or_default(),
+                        o.tile_cache_size,
                     )
                     .map_err(ConfigFileError::RendererPoolSpawnFailed)?;
                 results.set_pixel_ratios(o.pixel_ratios.unwrap_or_default());
@@ -397,6 +411,19 @@ mod tests {
             panic!("expected Object variant, got {:?}", cfg.rendering);
         };
         assert_eq!(renderer.png_max_colors(), max_colors);
+    }
+
+    #[cfg(feature = "rendering")]
+    #[rstest::rstest]
+    #[case::unset("rendering:\n  enabled: true\n", None)]
+    #[case::none("rendering:\n  enabled: true\n  tile_cache_size: 0\n", Some(0))]
+    #[case::small("rendering:\n  enabled: true\n  tile_cache_size: 2\n", Some(2))]
+    fn renderer_config_parses_the_tile_cache_size(#[case] yaml: &str, #[case] tile_cache_size: Option<u32>) {
+        let cfg: InnerStyleConfig = serde_saphyr::from_str(yaml).expect("rendering must parse");
+        let OptBoolObj::Object(renderer) = cfg.rendering else {
+            panic!("expected Object variant, got {:?}", cfg.rendering);
+        };
+        assert_eq!(renderer.tile_cache_size, tile_cache_size);
     }
 
     #[cfg(feature = "rendering")]

@@ -39,7 +39,7 @@ styles:
 
 Renders run on a dedicated thread pool.
 `rendering: true` sizes it from the logical CPU count, clamped to `2..=8`.
-The long form sets the number of render threads explicitly, how many [renderers](#renderers-per-worker) each keeps and whether they [share a graphics context](#context-per-worker), the [tile size](#tile-size), the [pixel ratios](#pixel-ratio) tiles and static images are served at, and the size of the [ambient cache](#ambient-cache):
+The long form sets the number of render threads explicitly, how many [renderers](#renderers-per-worker) each keeps, whether they [share a graphics context](#context-per-worker) and how many [tiles they cache](#tile-cache), the [tile size](#tile-size), the [pixel ratios](#pixel-ratio) tiles and static images are served at, and the size of the [ambient cache](#ambient-cache):
 
 ```yaml
 styles:
@@ -50,6 +50,8 @@ styles:
         renderers_per_worker: 8
         # Draw each worker's renderers in one graphics context [default: false]
         context_per_worker: false
+        # Tiles each renderer keeps per source after they leave the view [default: MapLibre Native's]
+        tile_cache_size: 2
         # Width and height of XYZ tiles in pixels: 256 or 512 [default: 512]
         tile_size: 512
         # Whole-number @{n}x pixel ratios served, each 1 to 4 [default: [1, 2]]
@@ -158,6 +160,14 @@ Each renderer holds its own memory: lower `renderers_per_worker` or list fewer `
 By default, every renderer draws in a graphics context of its own.
 A worker renders one image at a time, so with `context_per_worker: true` its renderers take turns in one context instead.
 On the CPU, each context costs Mesa (`llvmpipe`) about 14 MiB, so this cuts the memory of every renderer by about that much, without slowing rendering down.
+
+### Tile cache
+
+Each renderer keeps the tiles of its sources that have left the view, so it can draw them again without loading and parsing them.
+MapLibre Native sizes that cache for an interactive map, which pans back over the tiles it just showed.
+A tile server draws one image at a time, often far from the last one, so most of those tiles are never drawn again and hold memory in every renderer.
+`tile_cache_size` sets how many tiles each renderer keeps per source; `0` keeps none.
+A small value such as `2` still covers neighbouring requests.
 
 ### Ambient cache
 

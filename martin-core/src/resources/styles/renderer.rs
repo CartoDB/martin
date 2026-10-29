@@ -28,6 +28,8 @@ pub struct Runtime {
     device: GraphicsDeviceHandle,
     /// Whether each worker draws its renderers on a device of its own, in one graphics context.
     context_per_worker: bool,
+    /// Tiles each map keeps per source once they leave the view, or `None` for `MapLibre`'s default.
+    tile_cache_size: Option<u32>,
     /// Style-load listeners, by the id of the map they listen to.
     listeners: Arc<Mutex<HashMap<u64, Arc<StyleListener>>>>,
 }
@@ -58,10 +60,16 @@ impl Runtime {
     ///
     /// With `context_per_worker`, each worker creates a device of its own for its renderers (see [`WorkerDevice`]).
     ///
+    /// Every map keeps up to `tile_cache_size` tiles per source once they leave the view (`None` keeps `MapLibre`'s default).
+    ///
     /// # Errors
     ///
     /// Returns [`StyleError::GraphicsUnavailable`] when no graphics device can be created.
-    pub fn new(ambient_cache_bytes: Option<u64>, context_per_worker: bool) -> Result<Self, StyleError> {
+    pub fn new(
+        ambient_cache_bytes: Option<u64>,
+        context_per_worker: bool,
+        tile_cache_size: Option<u32>,
+    ) -> Result<Self, StyleError> {
         // Also created with `context_per_worker`, so a host without graphics fails at startup.
         let device = create_device(false)?;
         let handle = RuntimeHandle::create(&RuntimeOptions::default())?;
@@ -85,6 +93,7 @@ impl Runtime {
             handle: Releasable(Some(handle)),
             device,
             context_per_worker,
+            tile_cache_size,
             listeners,
         })
     }
@@ -234,6 +243,7 @@ impl Renderer {
         let options = MapOptions {
             map_mode: mode,
             event_mask: Some(RuntimeEventFlag::MAP_STYLE_LOADED | RuntimeEventFlag::MAP_LOADING_FAILED),
+            tile_cache_size: runtime.tile_cache_size,
             ..MapOptions::new(extent)
         };
         let (map, created) = runtime.handle.create_map(&options)?;

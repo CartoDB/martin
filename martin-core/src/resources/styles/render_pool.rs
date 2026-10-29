@@ -148,6 +148,9 @@ impl RenderPools {
     ///
     /// With `context_per_worker`, the renderers of each worker share one graphics context (see [`WorkerDevice`]).
     ///
+    /// `tile_cache_size` is how many tiles each renderer of both pools keeps per source once they leave
+    /// the view; `None` keeps `MapLibre`'s default.
+    ///
     /// # Errors
     ///
     /// Returns [`StyleError::GraphicsUnavailable`] if no graphics device can be created,
@@ -159,8 +162,9 @@ impl RenderPools {
         renderers_per_worker: NonZeroUsize,
         ambient_cache_bytes: Option<u64>,
         context_per_worker: bool,
+        tile_cache_size: Option<u32>,
     ) -> Result<Self, StyleError> {
-        let runtime = Arc::new(Runtime::new(ambient_cache_bytes, context_per_worker)?);
+        let runtime = Arc::new(Runtime::new(ambient_cache_bytes, context_per_worker, tile_cache_size)?);
         let tile_runtime = Arc::clone(&runtime);
         Ok(Self {
             tile: RenderPool::new(workers, move || {
@@ -682,7 +686,7 @@ mod tests {
     #[tokio::test]
     async fn concurrent_tile_renders_all_succeed() {
         let style_file = write_style();
-        let runtime = Arc::new(Runtime::new(None, false).expect("start runtime"));
+        let runtime = Arc::new(Runtime::new(None, false, None).expect("start runtime"));
         let pool = Arc::new(
             RenderPool::new(NonZeroUsize::new(4), move || {
                 TileWorker::new(Arc::clone(&runtime), DEFAULT_RENDERERS_PER_WORKER)
@@ -722,7 +726,7 @@ mod tests {
     #[tokio::test]
     async fn one_worker_renders_each_pixel_ratio_at_its_own_size() {
         let style_file = write_style();
-        let runtime = Arc::new(Runtime::new(None, false).expect("start runtime"));
+        let runtime = Arc::new(Runtime::new(None, false, None).expect("start runtime"));
         let pool = RenderPool::new(NonZeroUsize::new(1), move || {
             TileWorker::new(Arc::clone(&runtime), DEFAULT_RENDERERS_PER_WORKER)
         })
@@ -750,7 +754,7 @@ mod tests {
     #[tokio::test]
     async fn static_worker_renders_each_pixel_ratio_at_its_own_size(#[values(false, true)] context_per_worker: bool) {
         let style_file = write_style();
-        let runtime = Arc::new(Runtime::new(None, context_per_worker).expect("start runtime"));
+        let runtime = Arc::new(Runtime::new(None, context_per_worker, None).expect("start runtime"));
         let pool = RenderPool::new(NonZeroUsize::new(1), move || StaticWorker::new(Arc::clone(&runtime)))
             .expect("spawn render pool");
 
@@ -769,7 +773,7 @@ mod tests {
         let style_file = write_style();
         let mut rendered = Vec::new();
         for context_per_worker in [false, true] {
-            let runtime = Arc::new(Runtime::new(None, context_per_worker).expect("start runtime"));
+            let runtime = Arc::new(Runtime::new(None, context_per_worker, None).expect("start runtime"));
             let pool = RenderPool::new(NonZeroUsize::new(1), move || {
                 TileWorker::new(Arc::clone(&runtime), DEFAULT_RENDERERS_PER_WORKER)
             })
@@ -798,6 +802,40 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn renderers_render_the_same_whatever_tiles_they_keep() {
+        let style_file = write_style();
+        let mut rendered = Vec::new();
+        for tile_cache_size in [None, Some(0), Some(2)] {
+            let runtime = Arc::new(Runtime::new(None, false, tile_cache_size).expect("start runtime"));
+            let pool = RenderPool::new(NonZeroUsize::new(1), move || {
+                TileWorker::new(Arc::clone(&runtime), DEFAULT_RENDERERS_PER_WORKER)
+            })
+            .expect("spawn render pool");
+            let mut images = Vec::new();
+            // The renderer leaves the first tile and comes back to it.
+            for (z, x, y) in [(1, 0, 0), (1, 1, 1), (1, 0, 0)] {
+                let image = pool
+                    .render(TileRequest {
+                        style: style_file.path().to_path_buf().into(),
+                        z,
+                        x,
+                        y,
+                        tile_size: TileSize::Px512,
+                        pixel_ratio: NonZeroU8::MIN,
+                    })
+                    .await
+                    .expect("render");
+                images.push(image);
+            }
+            rendered.push(images);
+        }
+        assert!(
+            rendered[0] == rendered[1] && rendered[0] == rendered[2],
+            "renderers keeping different numbers of tiles render differently"
+        );
+    }
+
     #[rstest]
     #[case::px512_world(TileSize::Px512, 1, 0, 512)]
     #[case::px512_at_2x(TileSize::Px512, 2, 1, 1024)]
@@ -813,7 +851,7 @@ mod tests {
         #[case] px: u32,
     ) {
         let style_file = write_style();
-        let runtime = Arc::new(Runtime::new(None, false).expect("start runtime"));
+        let runtime = Arc::new(Runtime::new(None, false, None).expect("start runtime"));
         let pool = RenderPool::new(NonZeroUsize::new(1), move || {
             TileWorker::new(Arc::clone(&runtime), DEFAULT_RENDERERS_PER_WORKER)
         })
@@ -844,7 +882,7 @@ mod tests {
     #[case::a_hit_outlives_an_older_style(&[0, 1, 0, 2], &[2, 0])]
     fn a_full_worker_keeps_the_most_recently_used_styles(#[case] requested: &[usize], #[case] kept: &[usize]) {
         let styles: [_; 3] = std::array::from_fn(|_| write_style());
-        let runtime = Arc::new(Runtime::new(None, false).expect("start runtime"));
+        let runtime = Arc::new(Runtime::new(None, false, None).expect("start runtime"));
         let mut worker = TileWorker::new(runtime, NonZeroUsize::new(2).expect("2 != 0"));
 
         for &i in requested {
@@ -861,7 +899,7 @@ mod tests {
     #[test]
     fn each_geometry_of_a_style_has_its_own_renderer() {
         let style = write_style();
-        let runtime = Arc::new(Runtime::new(None, false).expect("start runtime"));
+        let runtime = Arc::new(Runtime::new(None, false, None).expect("start runtime"));
         let mut worker = TileWorker::new(runtime, DEFAULT_RENDERERS_PER_WORKER);
         let two_x = Geometry::Tile(TileSize::Px512, NonZeroU8::new(2).expect("2 != 0"));
 
@@ -875,7 +913,7 @@ mod tests {
 
     #[test]
     fn a_style_that_fails_to_load_takes_no_slot() {
-        let runtime = Arc::new(Runtime::new(None, false).expect("start runtime"));
+        let runtime = Arc::new(Runtime::new(None, false, None).expect("start runtime"));
         let mut worker = TileWorker::new(runtime, DEFAULT_RENDERERS_PER_WORKER);
 
         let result = worker.slot(&PathBuf::from("/nonexistent/style.json").into(), PX512);
@@ -891,7 +929,7 @@ mod tests {
             .tempfile()
             .expect("create style tempfile");
         std::fs::write(style.path(), "{ not a style").expect("write style");
-        let runtime = Arc::new(Runtime::new(None, false).expect("start runtime"));
+        let runtime = Arc::new(Runtime::new(None, false, None).expect("start runtime"));
         let mut worker = TileWorker::new(runtime, DEFAULT_RENDERERS_PER_WORKER);
 
         let err = worker.slot(&style.path().to_path_buf().into(), PX512).err();
@@ -903,7 +941,7 @@ mod tests {
     #[tokio::test]
     async fn static_worker_renders_each_size_at_its_own_size() {
         let style_file = write_style();
-        let runtime = Arc::new(Runtime::new(None, false).expect("start runtime"));
+        let runtime = Arc::new(Runtime::new(None, false, None).expect("start runtime"));
         let pool = RenderPool::new(NonZeroUsize::new(1), move || StaticWorker::new(Arc::clone(&runtime)))
             .expect("spawn render pool");
 
@@ -923,7 +961,7 @@ mod tests {
     #[tokio::test]
     async fn a_static_render_below_zoom_0_renders_as_zoom_0() {
         let style_file = write_style();
-        let runtime = Arc::new(Runtime::new(None, false).expect("start runtime"));
+        let runtime = Arc::new(Runtime::new(None, false, None).expect("start runtime"));
         let pool = RenderPool::new(NonZeroUsize::new(1), move || StaticWorker::new(Arc::clone(&runtime)))
             .expect("spawn render pool");
 
@@ -983,7 +1021,7 @@ mod tests {
     #[tokio::test]
     async fn static_render_honours_custom_size() {
         let style_file = write_style();
-        let runtime = Arc::new(Runtime::new(None, false).expect("start runtime"));
+        let runtime = Arc::new(Runtime::new(None, false, None).expect("start runtime"));
         let pool = RenderPool::new(NonZeroUsize::new(1), move || StaticWorker::new(Arc::clone(&runtime)))
             .expect("spawn render pool");
         let style = style_file.path().to_path_buf();
@@ -1000,7 +1038,7 @@ mod tests {
     #[tokio::test]
     async fn a_style_in_memory_renders_as_its_file_does() {
         let style_file = write_style();
-        let runtime = Arc::new(Runtime::new(None, false).expect("start runtime"));
+        let runtime = Arc::new(Runtime::new(None, false, None).expect("start runtime"));
         let pool = RenderPool::new(NonZeroUsize::new(1), move || StaticWorker::new(Arc::clone(&runtime)))
             .expect("spawn render pool");
 

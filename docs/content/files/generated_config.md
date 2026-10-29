@@ -642,6 +642,9 @@ styles:
     # Renderers each tile worker keeps loaded, one per style and pixel ratio.
     # Beyond this, the least recently used is dropped. [default: 8]
     renderers_per_worker: 16
+    # Tiles each renderer keeps per source after they leave the view, to draw them again without loading them.
+    # Unset keeps `MapLibre`'s default, sized for interactive maps; 0 keeps none.
+    tile_cache_size: 2
     # Width and height of rendered XYZ tiles, in pixels before the pixel ratio: 256 or 512.
     # [default: 512]
     tile_size: 256

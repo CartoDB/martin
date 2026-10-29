@@ -2229,6 +2229,13 @@
           "minimum": 1,
           "type": ["integer", "null"]
         },
+        "tile_cache_size": {
+          "description": "Tiles each renderer keeps per source after they leave the view, to draw them again without loading them.\nUnset keeps `MapLibre`'s default, sized for interactive maps; 0 keeps none.",
+          "examples": [2],
+          "format": "uint32",
+          "minimum": 0,
+          "type": ["integer", "null"]
+        },
         "tile_size": {
           "anyOf": [
             {
