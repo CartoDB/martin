@@ -381,9 +381,10 @@ fn default_worker_count() -> NonZeroUsize {
 ///
 /// Each style and geometry (the affinity key) has a set of workers, at first the least loaded one.
 /// A request goes to the least loaded worker of its set. When even that one has at least `min_queue`
-/// requests and `1 + epsilon` times the mean of all workers, the least loaded worker outside the set
-/// joins it. A set that has not been that loaded for `shrink_after` loses its most loaded worker,
-/// which drops its renderer for the key with `release_on_shrink`.
+/// requests and `1 + epsilon` times those of the least loaded worker outside the set (counting the
+/// request), that worker joins the set. A set without `min_queue` requests on its least loaded worker
+/// for `shrink_after` loses its most loaded worker, which drops its renderer for the key with
+/// `release_on_shrink`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AffinityOptions {
     pub epsilon: f64,
@@ -453,11 +454,13 @@ impl Affinity {
                     changed: now,
                 });
                 let mut worker = least(set.workers, true, key).unwrap_or(0);
-                let mean = loads.iter().sum::<usize>() as f64 / n as f64;
                 let load = loads[worker];
-                if load >= self.options.min_queue && load as f64 >= (1.0 + self.options.epsilon) * mean {
+                if load >= self.options.min_queue {
                     set.hot = now;
-                    if let Some(next) = least(set.workers, false, key).filter(|&w| loads[w] < load) {
+                    // Compared with the worker that would join, not with the mean: the mean includes the set's own queues.
+                    let next = least(set.workers, false, key)
+                        .filter(|&w| load as f64 >= (1.0 + self.options.epsilon) * (loads[w] + 1) as f64);
+                    if let Some(next) = next {
                         set.workers |= 1 << next;
                         set.changed = now;
                         worker = next;
