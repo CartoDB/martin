@@ -149,7 +149,9 @@ lambda-web = { version = "0.2.1", features = ["actix4"] }
 lasso = { version = "0.7.3", features = ["multi-threaded"] }
 log = "0.4"
 map-tile-toolkit = { path = "./map-tile-toolkit", version = "0.4.0" }
-maplibre-native-ffi = "0.202610.3"
+# TEMPORARY: `MapOptions::tile_cache_enabled` is not in a maplibre-native-ffi release yet; CartoDB's branch
+# carto/tile-cache-enabled. Back to a release once it ships there.
+maplibre-native-ffi = { git = "https://github.com/CartoDB/maplibre-native-ffi", rev = "57950a62aa01a761628f9307fa1ce0bd9797d6a5" }
 martin-config-macros = { path = "./martin-config-macros", version = "0.1.5" }
 martin-core = { path = "./martin-core", version = "0.15.0", default-features = false }
 martin-tile-utils = { path = "./martin-tile-utils", version = "0.9.2" }
