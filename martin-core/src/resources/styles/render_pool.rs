@@ -971,7 +971,9 @@ mod tests {
         let runtime = Arc::new(Runtime::new(None).expect("start runtime"));
         let mut worker = StaticWorker::new(runtime);
 
-        let err = with_test_timeout(SHORT_TIMEOUT, || worker.render(RenderParams::new(hanging, 0.0, 0.0, 1.0)).err());
+        let err = with_test_timeout(SHORT_TIMEOUT, || {
+            worker.render(RenderParams::new(hanging, 0.0, 0.0, 1.0)).err()
+        });
 
         assert!(matches!(err, Some(StyleError::Timeout { .. })), "{err:?}");
         assert!(worker.current.is_none());
@@ -996,8 +998,8 @@ mod tests {
         });
 
         for _ in 0..2 {
-            let params =
-                RenderParams::new(missing_glyphs_style(glyphs.path()), 0.0, 0.0, 2.0).with_overlays(Arc::clone(&overlay));
+            let params = RenderParams::new(missing_glyphs_style(glyphs.path()), 0.0, 0.0, 2.0)
+                .with_overlays(Arc::clone(&overlay));
             let err = worker.render(params).err();
             assert!(matches!(err, Some(StyleError::RenderingError(_))), "{err:?}");
             assert!(worker.current.is_none());
