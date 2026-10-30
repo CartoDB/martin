@@ -213,6 +213,8 @@ impl Renderer {
         let options = MapOptions {
             map_mode: mode,
             event_mask: Some(RuntimeEventFlag::MAP_STYLE_LOADED | RuntimeEventFlag::MAP_LOADING_FAILED),
+            // Each image is a view of its own, so the tiles a view leaves behind are seldom drawn again.
+            tile_cache_enabled: Some(false),
             ..MapOptions::new(extent)
         };
         let (map, created) = runtime.handle.create_map(&options)?;
