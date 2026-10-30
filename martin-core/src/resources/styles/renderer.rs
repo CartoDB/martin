@@ -30,6 +30,8 @@ pub struct Runtime {
     handle: Releasable<RuntimeHandle>,
     /// The device every renderer's texture lives on.
     device: GraphicsDeviceHandle,
+    /// Whether each map keeps the tiles that leave its view.
+    tile_cache: bool,
     /// Style-load listeners, by the id of the map they listen to.
     listeners: Arc<Mutex<HashMap<u64, Arc<StyleListener>>>>,
 }
@@ -58,10 +60,12 @@ impl Runtime {
     /// Creates a runtime whose ambient cache holds up to `ambient_cache_bytes`
     /// (`None` keeps `MapLibre`'s default, `Some(0)` disables it).
     ///
+    /// With `tile_cache`, every map keeps the tiles that leave its view, as `MapLibre` does by default.
+    ///
     /// # Errors
     ///
     /// Returns [`StyleError::GraphicsUnavailable`] when no graphics device can be created.
-    pub fn new(ambient_cache_bytes: Option<u64>) -> Result<Self, StyleError> {
+    pub fn new(ambient_cache_bytes: Option<u64>, tile_cache: bool) -> Result<Self, StyleError> {
         forward_logs();
         let device = GraphicsDeviceHandle::create(None).map_err(|err| StyleError::GraphicsUnavailable {
             reason: err.to_string(),
@@ -90,6 +94,7 @@ impl Runtime {
         Ok(Self {
             handle: Releasable(Some(handle)),
             device,
+            tile_cache,
             listeners,
         })
     }
@@ -213,8 +218,7 @@ impl Renderer {
         let options = MapOptions {
             map_mode: mode,
             event_mask: Some(RuntimeEventFlag::MAP_STYLE_LOADED | RuntimeEventFlag::MAP_LOADING_FAILED),
-            // Each image is a view of its own, so the tiles a view leaves behind are seldom drawn again.
-            tile_cache_enabled: Some(false),
+            tile_cache_enabled: Some(runtime.tile_cache),
             ..MapOptions::new(extent)
         };
         let (map, created) = runtime.handle.create_map(&options)?;

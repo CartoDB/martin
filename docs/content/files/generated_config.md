@@ -639,6 +639,9 @@ styles:
     # Renderers each tile worker keeps loaded, one per style and pixel ratio.
     # Beyond this, the least recently used is dropped. [default: 8]
     renderers_per_worker: 16
+    # Keep the tiles each renderer has drawn after they leave its view, as an interactive map does, to draw them
+    # again without loading them. Off by default: a tile server seldom draws them again. [default: false]
+    tile_cache: true
     # Width and height of rendered XYZ tiles, in pixels before the pixel ratio: 256 or 512.
     # [default: 512]
     tile_size: 256

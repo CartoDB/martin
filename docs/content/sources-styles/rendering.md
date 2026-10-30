@@ -39,7 +39,7 @@ styles:
 
 Renders run on a dedicated thread pool.
 `rendering: true` sizes it from the logical CPU count, clamped to `2..=8`.
-The long form sets the number of render threads explicitly, how many [renderers](#renderers-per-worker) each keeps, the [tile size](#tile-size), the [pixel ratios](#pixel-ratio) tiles and static images are served at, and the size of the [ambient cache](#ambient-cache):
+The long form sets the number of render threads explicitly, how many [renderers](#renderers-per-worker) each keeps, the [tile size](#tile-size), the [pixel ratios](#pixel-ratio) tiles and static images are served at, the size of the [ambient cache](#ambient-cache) and whether renderers keep a [tile cache](#tile-cache):
 
 ```yaml
 styles:
@@ -54,6 +54,8 @@ styles:
         pixel_ratios: [1, 2]
         # MB of MapLibre Native's cache of fetched tiles, glyphs and sprites, 0 to disable [default: 50 MiB]
         ambient_cache_size_mb: 0
+        # Keep the tiles each renderer drew after they leave its view [default: false]
+        tile_cache: false
         # Indexed PNG palette; `false` keeps full-color RGBA [default: max_colors 128]
         png_palette:
             max_colors: 128
@@ -159,6 +161,12 @@ Every fetched resource is compressed and stored there, and every fetch looks it 
 A cached resource spares a request only while its `Cache-Control` says it is fresh, and Martin sends none unless `cache_control` is set in the [configuration file](../config-file/index.md).
 When the style's sources are Martin's own, the tiles are already a local read away, so `ambient_cache_size_mb: 0` saves that work.
 Keep it for styles that fetch from other servers.
+
+### Tile cache
+
+MapLibre Native keeps the tiles that leave a map's view, so an interactive map can pan back over them without loading and parsing them again.
+Martin draws each image as a view of its own and seldom draws those tiles again, while every renderer would hold them in memory.
+Renderers keep none unless `tile_cache: true`.
 
 ### Shader cache
 

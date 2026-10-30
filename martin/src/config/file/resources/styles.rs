@@ -67,6 +67,12 @@ pub struct RendererConfig {
     #[cfg_attr(feature = "unstable-schemas", schemars(example = &50))]
     pub ambient_cache_size_mb: Option<u64>,
 
+    /// Keep the tiles each renderer has drawn after they leave its view, as an interactive map does, to draw them
+    /// again without loading them. Off by default: a tile server seldom draws them again. \[default: false\]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "unstable-schemas", schemars(example = &true))]
+    pub tile_cache: Option<bool>,
+
     /// Whole-number `@{n}x` pixel ratios served, each 1 to 4. Others are answered with `400 Bad Request`.
     /// \[default: \[1, 2\]\]
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -217,7 +223,7 @@ impl StyleConfig {
             OptBoolObj::Object(ref o) if !o.enabled => results.disable_rendering(),
             OptBoolObj::Bool(true) => {
                 results
-                    .enable_rendering(None, TileSize::default(), DEFAULT_RENDERERS_PER_WORKER, None)
+                    .enable_rendering(None, TileSize::default(), DEFAULT_RENDERERS_PER_WORKER, None, false)
                     .map_err(ConfigFileError::RendererPoolSpawnFailed)?;
                 results.set_png_max_colors(RendererConfig::default().png_max_colors());
             }
@@ -228,6 +234,7 @@ impl StyleConfig {
                         o.tile_size.unwrap_or_default(),
                         o.renderers_per_worker.unwrap_or(DEFAULT_RENDERERS_PER_WORKER),
                         o.ambient_cache_bytes(),
+                        o.tile_cache.unwrap_or_default(),
                     )
                     .map_err(ConfigFileError::RendererPoolSpawnFailed)?;
                 results.set_pixel_ratios(o.pixel_ratios.unwrap_or_default());
@@ -390,6 +397,19 @@ mod tests {
             panic!("expected Object variant, got {:?}", cfg.rendering);
         };
         assert_eq!(renderer.png_max_colors(), max_colors);
+    }
+
+    #[cfg(feature = "rendering")]
+    #[rstest::rstest]
+    #[case::unset("rendering:\n  enabled: true\n", None)]
+    #[case::on("rendering:\n  enabled: true\n  tile_cache: true\n", Some(true))]
+    #[case::off("rendering:\n  enabled: true\n  tile_cache: false\n", Some(false))]
+    fn renderer_config_parses_the_tile_cache(#[case] yaml: &str, #[case] tile_cache: Option<bool>) {
+        let cfg: InnerStyleConfig = serde_saphyr::from_str(yaml).expect("rendering must parse");
+        let OptBoolObj::Object(renderer) = cfg.rendering else {
+            panic!("expected Object variant, got {:?}", cfg.rendering);
+        };
+        assert_eq!(renderer.tile_cache, tile_cache);
     }
 
     #[cfg(feature = "rendering")]

@@ -2224,6 +2224,11 @@
           "minimum": 1,
           "type": ["integer", "null"]
         },
+        "tile_cache": {
+          "description": "Keep the tiles each renderer has drawn after they leave its view, as an interactive map does, to draw them\nagain without loading them. Off by default: a tile server seldom draws them again. \\[default: false\\]",
+          "examples": [true],
+          "type": ["boolean", "null"]
+        },
         "tile_size": {
           "anyOf": [
             {
