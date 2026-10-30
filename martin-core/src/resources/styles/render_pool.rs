@@ -645,6 +645,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    use crate::resources::styles::renderer::with_test_timeout;
 
     const POLY_STYLE: &str = r##"{
         "version": 8,
@@ -903,6 +904,107 @@ mod tests {
             .expect("render at zoom -2");
 
         assert!(at_zoom_0 == below_zoom_0, "zoom -2 renders differently from zoom 0");
+    }
+
+    /// A style whose tiles come from a server that accepts connections and never answers,
+    /// so its still image never completes. The listener must outlive the renders.
+    fn hanging_style() -> (std::net::TcpListener, RenderStyle) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("local address").port();
+        let style = serde_json::json!({
+            "version": 8,
+            "sources": {"hang": {"type": "vector", "tiles": [format!("http://127.0.0.1:{port}/{{z}}/{{x}}/{{y}}.pbf")]}},
+            "layers": [{"id": "hang", "type": "fill", "source": "hang", "source-layer": "hang"}]
+        });
+        (listener, RenderStyle::Json(style.to_string().into()))
+    }
+
+    /// A style whose only label needs a glyph range that is not in `glyphs`, so its still image fails.
+    fn missing_glyphs_style(glyphs: &std::path::Path) -> RenderStyle {
+        let style = serde_json::json!({
+            "version": 8,
+            "glyphs": format!("file://{}/{{fontstack}}/{{range}}.pbf", glyphs.display()),
+            "sources": {"label": {"type": "geojson", "data": {
+                "type": "Feature",
+                "properties": {"name": "東"},
+                "geometry": {"type": "Point", "coordinates": [0, 0]}
+            }}},
+            "layers": [
+                {"id": "bg", "type": "background", "paint": {"background-color": "#ffffff"}},
+                {"id": "label", "type": "symbol", "source": "label",
+                 "layout": {"text-field": ["get", "name"], "text-font": ["Missing Font"]}}
+            ]
+        });
+        RenderStyle::Json(style.to_string().into())
+    }
+
+    const SHORT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+    #[test]
+    fn a_tile_renderer_that_times_out_is_replaced() {
+        let (_listener, hanging) = hanging_style();
+        let style_file = write_style();
+        let runtime = Arc::new(Runtime::new(None).expect("start runtime"));
+        let mut worker = TileWorker::new(runtime, DEFAULT_RENDERERS_PER_WORKER);
+        let tile = |style: RenderStyle| TileRequest {
+            style,
+            z: 1,
+            x: 0,
+            y: 0,
+            tile_size: TileSize::Px512,
+            pixel_ratio: NonZeroU8::MIN,
+        };
+
+        let err = with_test_timeout(SHORT_TIMEOUT, || worker.render(tile(hanging)).err());
+
+        assert!(matches!(err, Some(StyleError::Timeout { .. })), "{err:?}");
+        assert!(worker.slots.is_empty());
+        worker
+            .render(tile(style_file.path().to_path_buf().into()))
+            .expect("render after a timeout");
+    }
+
+    #[test]
+    fn a_static_renderer_that_times_out_is_replaced() {
+        let (_listener, hanging) = hanging_style();
+        let style_file = write_style();
+        let runtime = Arc::new(Runtime::new(None).expect("start runtime"));
+        let mut worker = StaticWorker::new(runtime);
+
+        let err = with_test_timeout(SHORT_TIMEOUT, || worker.render(RenderParams::new(hanging, 0.0, 0.0, 1.0)).err());
+
+        assert!(matches!(err, Some(StyleError::Timeout { .. })), "{err:?}");
+        assert!(worker.current.is_none());
+        worker
+            .render(RenderParams::new(style_file.path().to_path_buf(), 0.0, 0.0, 1.0))
+            .expect("render after a timeout");
+    }
+
+    #[test]
+    fn a_static_renderer_whose_overlaid_still_image_fails_is_replaced() {
+        let glyphs = tempfile::tempdir().expect("glyph dir");
+        let style_file = write_style();
+        let runtime = Arc::new(Runtime::new(None).expect("start runtime"));
+        let mut worker = StaticWorker::new(runtime);
+        let overlay = Arc::new(OverlaySpec {
+            features: vec![crate::overlay::OverlayFeature {
+                geometry: Some(
+                    serde_json::from_value(serde_json::json!({"type": "Point", "coordinates": [0, 0]})).expect("point"),
+                ),
+                properties: None,
+            }],
+        });
+
+        for _ in 0..2 {
+            let params =
+                RenderParams::new(missing_glyphs_style(glyphs.path()), 0.0, 0.0, 2.0).with_overlays(Arc::clone(&overlay));
+            let err = worker.render(params).err();
+            assert!(matches!(err, Some(StyleError::RenderingError(_))), "{err:?}");
+            assert!(worker.current.is_none());
+        }
+        worker
+            .render(RenderParams::new(style_file.path().to_path_buf(), 0.0, 0.0, 2.0).with_overlays(overlay))
+            .expect("render after a failed one");
     }
 
     struct FlakyWorker;

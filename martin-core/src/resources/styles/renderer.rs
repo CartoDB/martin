@@ -24,6 +24,32 @@ use crate::resources::styles::StyleError;
 /// How long a call into `MapLibre` may take before its renderer is given up on.
 const NATIVE_TIMEOUT: Duration = Duration::from_secs(60);
 
+#[cfg(test)]
+thread_local! {
+    /// The timeout of the calls made on this thread, which a test can shorten.
+    static TEST_TIMEOUT: std::cell::Cell<Duration> = const { std::cell::Cell::new(NATIVE_TIMEOUT) };
+}
+
+/// How long a call into `MapLibre` may take: [`NATIVE_TIMEOUT`], unless a test shortened it for its thread.
+#[cfg(not(test))]
+const fn native_timeout() -> Duration {
+    NATIVE_TIMEOUT
+}
+
+#[cfg(test)]
+fn native_timeout() -> Duration {
+    TEST_TIMEOUT.get()
+}
+
+/// Runs `f` with the calls into `MapLibre` it makes on this thread giving up after `timeout`.
+#[cfg(test)]
+pub(crate) fn with_test_timeout<R>(timeout: Duration, f: impl FnOnce() -> R) -> R {
+    let previous = TEST_TIMEOUT.replace(timeout);
+    let result = f();
+    TEST_TIMEOUT.set(previous);
+    result
+}
+
 /// A `MapLibre` runtime and graphics device shared by every renderer of a pool, with one ambient cache.
 pub struct Runtime {
     /// The native runtime.
@@ -268,7 +294,8 @@ impl Renderer {
         &self,
         set: impl FnOnce(&MapHandle) -> maplibre_native_ffi::Result<NativeFuture<CommandCompletion>>,
     ) -> Result<(), StyleError> {
-        let until = Instant::now() + NATIVE_TIMEOUT;
+        let timeout = native_timeout();
+        let until = Instant::now() + timeout;
         self.style.begin();
         // A failed style command loads nothing, so no outcome would ever arrive.
         let set = match block_on(&self.signal, set(&self.map)?, "style command") {
@@ -285,7 +312,7 @@ impl Renderer {
             Some(StyleOutcome::Failed(message)) => Err(StyleError::StyleLoadError { message }),
             None => Err(StyleError::Timeout {
                 call: "style load",
-                timeout: NATIVE_TIMEOUT,
+                timeout,
             }),
         }
     }
@@ -452,7 +479,7 @@ impl Wake for Signal {
     }
 }
 
-/// Blocks the calling thread until `future` resolves, sleeping on `signal` between polls, or fails `call` once [`NATIVE_TIMEOUT`] has passed.
+/// Blocks the calling thread until `future` resolves, sleeping on `signal` between polls, or fails `call` once [`native_timeout`] has passed.
 fn block_on<T, E>(
     signal: &Arc<Signal>,
     mut future: impl Future<Output = Result<T, E>> + Unpin,
@@ -461,7 +488,8 @@ fn block_on<T, E>(
 where
     StyleError: From<E>,
 {
-    let until = Instant::now() + NATIVE_TIMEOUT;
+    let timeout = native_timeout();
+    let until = Instant::now() + timeout;
     let waker = Waker::from(Arc::clone(signal));
     let mut context = Context::from_waker(&waker);
     loop {
@@ -470,10 +498,7 @@ where
             return Ok(output?);
         }
         if Instant::now() >= until {
-            return Err(StyleError::Timeout {
-                call,
-                timeout: NATIVE_TIMEOUT,
-            });
+            return Err(StyleError::Timeout { call, timeout });
         }
         signal.wait_past(seen, until);
     }
